@@ -10,11 +10,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from youtube_mcp import ToolFailure, YouTubeLocalizer, tool_definitions
+from youtube_mcp import GoogleApiFailure, ToolFailure, YouTubeLocalizer, tool_definitions
 
 
 VIDEO = {
     "id": "abc123xyz00",
+    "etag": "\"etag-1\"",
     "channelId": "channel-1",
     "channelTitle": "Demo",
     "title": "Original title",
@@ -37,12 +38,30 @@ class FakeYouTubeLocalizer(YouTubeLocalizer):
         super().__init__(root)
         self.video = json.loads(json.dumps(VIDEO))
         self.sent: list[dict] = []
+        self.update_error: Exception | None = None
 
     def _get_video(self, _video_id: str) -> dict:
         return json.loads(json.dumps(self.video))
 
-    def _api(self, resource: str, params: dict, method: str = "GET", body: dict | None = None) -> dict:
-        self.sent.append({"resource": resource, "params": params, "method": method, "body": body})
+    def _api(
+        self,
+        resource: str,
+        params: dict,
+        method: str = "GET",
+        body: dict | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict:
+        self.sent.append(
+            {
+                "resource": resource,
+                "params": params,
+                "method": method,
+                "body": body,
+                "extra_headers": extra_headers,
+            }
+        )
+        if self.update_error:
+            raise self.update_error
         return {"id": self.video["id"]}
 
 
@@ -99,6 +118,7 @@ class UpdateTests(unittest.TestCase):
         body = self.server.sent[0]["body"]
         self.assertEqual(body["localizations"]["de"], VIDEO["localizations"]["de"])
         self.assertIn("uk", body["localizations"])
+        self.assertEqual(self.server.sent[0]["extra_headers"], {"If-Match": VIDEO["etag"]})
 
     def test_title_limit(self) -> None:
         with self.assertRaisesRegex(ToolFailure, "limit is 100"):
@@ -108,6 +128,62 @@ class UpdateTests(unittest.TestCase):
                     "translations": {"uk": {"title": "x" * 101, "description": "ok"}},
                 }
             )
+
+    def test_description_limit_uses_utf8_bytes(self) -> None:
+        accepted = self.server.prepare_update(
+            {
+                "video_id": VIDEO["id"],
+                "translations": {"uk": {"title": "Нове", "description": "ї" * 2500}},
+            }
+        )
+        self.assertEqual(accepted["changes"][0]["description_characters"], 2500)
+        self.assertEqual(accepted["changes"][0]["description_bytes"], 5000)
+        with self.assertRaisesRegex(ToolFailure, "5002 UTF-8 bytes"):
+            self.server.prepare_update(
+                {
+                    "video_id": VIDEO["id"],
+                    "translations": {"uk": {"title": "Нове", "description": "ї" * 2501}},
+                }
+            )
+
+    def test_rejects_angle_brackets(self) -> None:
+        with self.assertRaisesRegex(ToolFailure, "title.*cannot contain"):
+            self.server.prepare_update(
+                {
+                    "video_id": VIDEO["id"],
+                    "translations": {"uk": {"title": "Нове <відео>", "description": "ok"}},
+                }
+            )
+        with self.assertRaisesRegex(ToolFailure, "description.*cannot contain"):
+            self.server.prepare_update(
+                {
+                    "video_id": VIDEO["id"],
+                    "translations": {"uk": {"title": "Нове", "description": "<b>опис</b>"}},
+                }
+            )
+
+    def test_prepare_requires_etag(self) -> None:
+        self.server.video.pop("etag")
+        with self.assertRaisesRegex(ToolFailure, "no ETag"):
+            self.server.prepare_update(
+                {
+                    "video_id": VIDEO["id"],
+                    "translations": {"uk": {"title": "Нове", "description": "Опис"}},
+                }
+            )
+
+    def test_commit_handles_etag_precondition_failure(self) -> None:
+        preview = self.server.prepare_update(
+            {
+                "video_id": VIDEO["id"],
+                "translations": {"uk": {"title": "Нове", "description": "Опис"}},
+            }
+        )
+        token = preview["confirmation_token"]
+        self.server.update_error = GoogleApiFailure(412, "Precondition Failed")
+        with self.assertRaisesRegex(ToolFailure, "changed during commit"):
+            self.server.commit_update({"confirmation_token": token})
+        self.assertNotIn(token, self.server._pending)
 
     def test_configure_oauth_from_local_json(self) -> None:
         oauth_path = Path(self.temp.name) / "client.json"

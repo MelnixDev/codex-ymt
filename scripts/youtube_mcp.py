@@ -36,6 +36,15 @@ class ToolFailure(RuntimeError):
     """An expected error that should be shown to the user."""
 
 
+class GoogleApiFailure(ToolFailure):
+    """A structured Google API error that callers can handle safely."""
+
+    def __init__(self, status: int, message: str, reason: str | None = None) -> None:
+        super().__init__(f"Google API error ({status}): {message}")
+        self.status = status
+        self.reason = reason
+
+
 def utc_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -339,12 +348,16 @@ class YouTubeLocalizer:
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
+            reason = None
             try:
                 detail = json.loads(raw).get("error", {})
                 message = detail.get("message") or raw
+                errors = detail.get("errors", [])
+                if errors and isinstance(errors[0], dict):
+                    reason = errors[0].get("reason")
             except json.JSONDecodeError:
                 message = raw or str(exc)
-            raise ToolFailure(f"Google API error ({exc.code}): {message}") from exc
+            raise GoogleApiFailure(exc.code, str(message), reason) from exc
         except URLError as exc:
             raise ToolFailure(f"Could not reach Google API: {exc.reason}") from exc
         if not raw:
@@ -363,10 +376,13 @@ class YouTubeLocalizer:
         params: dict[str, Any],
         method: str = "GET",
         body: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         query = urlencode({key: value for key, value in params.items() if value is not None})
         url = f"{YOUTUBE_API}/{resource}?{query}"
         headers = {"Authorization": f"Bearer {self._access_token()}"}
+        if extra_headers:
+            headers.update(extra_headers)
         data = None
         if body is not None:
             headers["Content-Type"] = "application/json"
@@ -598,11 +614,16 @@ class YouTubeLocalizer:
                 raise ToolFailure(
                     f"Translation title for {code} is {len(title)} characters; limit is {TITLE_LIMIT}."
                 )
-            if len(description) > DESCRIPTION_LIMIT:
+            if "<" in title or ">" in title:
+                raise ToolFailure(f"Translation title for {code} cannot contain '<' or '>'.")
+            description_bytes = len(description.encode("utf-8"))
+            if description_bytes > DESCRIPTION_LIMIT:
                 raise ToolFailure(
-                    f"Translation description for {code} is {len(description)} characters; "
-                    f"limit is {DESCRIPTION_LIMIT}."
+                    f"Translation description for {code} is {description_bytes} UTF-8 bytes; "
+                    f"limit is {DESCRIPTION_LIMIT} bytes."
                 )
+            if "<" in description or ">" in description:
+                raise ToolFailure(f"Translation description for {code} cannot contain '<' or '>'.")
             normalized[code] = {"title": title, "description": description}
         return normalized
 
@@ -618,6 +639,11 @@ class YouTubeLocalizer:
         if unknown:
             raise ToolFailure(f"Selected languages are missing translations: {', '.join(unknown)}")
         video = self._get_video(video_id)
+        etag = str(video.get("etag", "")).strip()
+        if not etag:
+            raise ToolFailure(
+                "YouTube returned no ETag for this video. No update preview was created."
+            )
         source_language = str(args.get("source_language", "")).strip()
         default_language_change = None
         if not video.get("defaultLanguage"):
@@ -650,6 +676,7 @@ class YouTubeLocalizer:
                     "after": proposed,
                     "title_characters": len(proposed["title"]),
                     "description_characters": len(proposed["description"]),
+                    "description_bytes": len(proposed["description"].encode("utf-8")),
                 }
             )
             merged[language] = proposed
@@ -663,6 +690,7 @@ class YouTubeLocalizer:
             "source_language": source_language or video.get("defaultLanguage"),
             "set_default_language": bool(default_language_change),
             "state_fingerprint": self._state_fingerprint(video),
+            "etag": etag,
             "expires_at": time.time() + PENDING_TTL_SECONDS,
         }
         self._pending[token] = pending
@@ -686,7 +714,10 @@ class YouTubeLocalizer:
             self._pending.pop(token, None)
             raise ToolFailure("Confirmation token expired. Prepare and review a new preview.")
         video = self._get_video(pending["video_id"])
-        if self._state_fingerprint(video) != pending["state_fingerprint"]:
+        if (
+            self._state_fingerprint(video) != pending["state_fingerprint"]
+            or video.get("etag") != pending["etag"]
+        ):
             self._pending.pop(token, None)
             raise ToolFailure(
                 "The video changed after preview. No update was sent. Fetch it and prepare a new diff."
@@ -711,7 +742,22 @@ class YouTubeLocalizer:
             body["snippet"] = snippet
             part = "snippet,localizations"
 
-        response = self._api("videos", {"part": part}, method="PUT", body=body)
+        try:
+            response = self._api(
+                "videos",
+                {"part": part},
+                method="PUT",
+                body=body,
+                extra_headers={"If-Match": pending["etag"]},
+            )
+        except GoogleApiFailure as exc:
+            if exc.status == 412:
+                self._pending.pop(token, None)
+                raise ToolFailure(
+                    "The video changed during commit. YouTube rejected the update. "
+                    "Fetch it and prepare a new diff."
+                ) from exc
+            raise
         self._pending.pop(token, None)
         return {
             "saved": True,
