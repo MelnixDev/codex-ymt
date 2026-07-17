@@ -7,10 +7,17 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from youtube_mcp import GoogleApiFailure, ToolFailure, YouTubeLocalizer, tool_definitions
+from youtube_mcp import (
+    GOOGLE_REVOKE_URL,
+    GoogleApiFailure,
+    ToolFailure,
+    YouTubeLocalizer,
+    tool_definitions,
+)
 
 
 VIDEO = {
@@ -39,6 +46,8 @@ class FakeYouTubeLocalizer(YouTubeLocalizer):
         self.video = json.loads(json.dumps(VIDEO))
         self.sent: list[dict] = []
         self.update_error: Exception | None = None
+        self.form_requests: list[dict] = []
+        self.form_error: Exception | None = None
 
     def _get_video(self, _video_id: str) -> dict:
         return json.loads(json.dumps(self.video))
@@ -63,6 +72,12 @@ class FakeYouTubeLocalizer(YouTubeLocalizer):
         if self.update_error:
             raise self.update_error
         return {"id": self.video["id"]}
+
+    def _form_request(self, url: str, values: dict) -> dict:
+        self.form_requests.append({"url": url, "values": values})
+        if self.form_error:
+            raise self.form_error
+        return {}
 
 
 class UpdateTests(unittest.TestCase):
@@ -203,11 +218,130 @@ class UpdateTests(unittest.TestCase):
         stored = json.loads(self.server.credentials_path.read_text(encoding="utf-8"))
         self.assertEqual(stored["client_id"], "demo.apps.googleusercontent.com")
 
+    def _oauth_json(self, name: str, client_id: str, kind: str = "installed") -> Path:
+        path = Path(self.temp.name) / name
+        path.write_text(
+            json.dumps(
+                {
+                    kind: {
+                        "client_id": client_id,
+                        "client_secret": "secret-value",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_configure_oauth_requires_local_json_path(self) -> None:
+        with self.assertRaisesRegex(ToolFailure, "client_json_path is required"):
+            self.server.configure_oauth(
+                {
+                    "client_id": "demo.apps.googleusercontent.com",
+                    "client_secret": "secret-value",
+                }
+            )
+
+    def test_configure_oauth_rejects_web_client(self) -> None:
+        path = self._oauth_json("web.json", "web.apps.googleusercontent.com", kind="web")
+        with self.assertRaisesRegex(ToolFailure, "Web OAuth clients are not supported"):
+            self.server.configure_oauth({"client_json_path": str(path)})
+
+    def test_same_oauth_client_preserves_token(self) -> None:
+        path = self._oauth_json("same.json", "same.apps.googleusercontent.com")
+        self.server.configure_oauth({"client_json_path": str(path)})
+        self.server.token_path.write_text('{"refresh_token":"keep-me"}', encoding="utf-8")
+        result = self.server.configure_oauth({"client_json_path": str(path)})
+        self.assertFalse(result["token_cleared"])
+        self.assertTrue(self.server.token_path.exists())
+
+    def test_changed_oauth_client_clears_token(self) -> None:
+        first = self._oauth_json("first.json", "first.apps.googleusercontent.com")
+        second = self._oauth_json("second.json", "second.apps.googleusercontent.com")
+        self.server.configure_oauth({"client_json_path": str(first)})
+        self.server.token_path.write_text('{"refresh_token":"old-token"}', encoding="utf-8")
+        result = self.server.configure_oauth({"client_json_path": str(second)})
+        self.assertTrue(result["token_cleared"])
+        self.assertTrue(result["reconnect_required"])
+        self.assertFalse(self.server.token_path.exists())
+
+    def test_local_json_errors_do_not_expose_path(self) -> None:
+        path = Path(self.temp.name) / "private-client.json"
+        path.write_text("not-json", encoding="utf-8")
+        with self.assertRaises(ToolFailure) as raised:
+            self.server.configure_oauth({"client_json_path": str(path)})
+        self.assertNotIn(str(path), str(raised.exception))
+
+    def test_prepare_disconnect_without_token_is_noop(self) -> None:
+        result = self.server.prepare_disconnect({})
+        self.assertFalse(result["ready"])
+        self.assertFalse(result["connected"])
+
+    def test_disconnect_requires_valid_confirmation(self) -> None:
+        self.server.token_path.write_text('{"refresh_token":"token-value"}', encoding="utf-8")
+        with self.assertRaisesRegex(ToolFailure, "missing or unknown"):
+            self.server.commit_disconnect({"confirmation_token": "unknown"})
+        preview = self.server.prepare_disconnect({})
+        token = preview["confirmation_token"]
+        self.server._disconnect_pending[token]["expires_at"] = time.time() - 1
+        with self.assertRaisesRegex(ToolFailure, "expired"):
+            self.server.commit_disconnect({"confirmation_token": token})
+        self.assertTrue(self.server.token_path.exists())
+
+    def test_disconnect_revokes_and_deletes_local_token(self) -> None:
+        self.server.token_path.write_text('{"refresh_token":"token-value"}', encoding="utf-8")
+        preview = self.server.prepare_disconnect({})
+        result = self.server.commit_disconnect(
+            {"confirmation_token": preview["confirmation_token"]}
+        )
+        self.assertTrue(result["remote_revoked"])
+        self.assertTrue(result["local_token_deleted"])
+        self.assertFalse(self.server.token_path.exists())
+        self.assertEqual(self.server.form_requests[0]["url"], GOOGLE_REVOKE_URL)
+        self.assertEqual(self.server.form_requests[0]["values"], {"token": "token-value"})
+
+    def test_disconnect_rejects_changed_connection(self) -> None:
+        self.server.token_path.write_text('{"refresh_token":"first-token"}', encoding="utf-8")
+        preview = self.server.prepare_disconnect({})
+        self.server.token_path.write_text('{"refresh_token":"second-token"}', encoding="utf-8")
+        with self.assertRaisesRegex(ToolFailure, "connection changed"):
+            self.server.commit_disconnect(
+                {"confirmation_token": preview["confirmation_token"]}
+            )
+        self.assertTrue(self.server.token_path.exists())
+        self.assertEqual(self.server.form_requests, [])
+
+    def test_disconnect_treats_invalid_token_as_already_revoked(self) -> None:
+        self.server.token_path.write_text('{"access_token":"token-value"}', encoding="utf-8")
+        self.server.form_error = GoogleApiFailure(400, "Invalid token", "invalid_token")
+        preview = self.server.prepare_disconnect({})
+        result = self.server.commit_disconnect(
+            {"confirmation_token": preview["confirmation_token"]}
+        )
+        self.assertTrue(result["already_revoked"])
+        self.assertFalse(self.server.token_path.exists())
+
+    def test_disconnect_network_failure_retains_local_token(self) -> None:
+        self.server.token_path.write_text('{"refresh_token":"token-value"}', encoding="utf-8")
+        self.server.form_error = ToolFailure("Could not reach Google API")
+        preview = self.server.prepare_disconnect({})
+        token = preview["confirmation_token"]
+        with self.assertRaisesRegex(ToolFailure, "Could not reach"):
+            self.server.commit_disconnect({"confirmation_token": token})
+        self.assertTrue(self.server.token_path.exists())
+        self.assertIn(token, self.server._disconnect_pending)
+
 
 class ProtocolTests(unittest.TestCase):
     def test_tool_names_are_unique(self) -> None:
         names = [tool["name"] for tool in tool_definitions()]
         self.assertEqual(len(names), len(set(names)))
+
+    def test_write_tool_annotations_are_conservative(self) -> None:
+        tools = {tool["name"]: tool for tool in tool_definitions()}
+        self.assertTrue(tools["youtube_commit_update"]["annotations"]["destructiveHint"])
+        self.assertFalse(tools["youtube_auth_status"]["annotations"]["readOnlyHint"])
+        self.assertTrue(tools["youtube_commit_disconnect"]["annotations"]["destructiveHint"])
 
     def test_stdio_initialize_and_tool_list(self) -> None:
         script = Path(__file__).with_name("youtube_mcp.py")

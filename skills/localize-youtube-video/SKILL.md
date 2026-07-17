@@ -10,9 +10,16 @@ Use the `codex-ymt` MCP tools for YouTube data and local storage. Generate trans
 ## Connect
 
 1. Call `youtube_auth_status`.
-2. If OAuth is not configured, read [references/google-oauth.md](references/google-oauth.md). Prefer the downloaded Desktop OAuth JSON: ask for its local path and call `youtube_configure_oauth` with `client_json_path`. Use direct client ID and secret only when the user explicitly prefers that fallback.
+2. If OAuth is not configured, read [references/google-oauth.md](references/google-oauth.md). Ask for the local path to a downloaded Desktop OAuth JSON and call `youtube_configure_oauth` with `client_json_path`. For headless environments, the user can configure `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` outside the conversation.
 3. If disconnected, call `youtube_auth_start`, give the returned URL to the user, and wait for them to finish Google consent. Then call `youtube_auth_status` again.
 4. Never request that the user paste a secret into the conversation when a local OAuth JSON file is available. Never expose stored credentials or tokens in the response.
+
+## Disconnect
+
+1. Call `youtube_prepare_disconnect` and show its exact effects and preserved local data.
+2. Ask for explicit confirmation. A request to inspect connection status or explain disconnection is not confirmation.
+3. Only after approval, call `youtube_commit_disconnect` with the returned confirmation token.
+4. If revocation fails, explain that the local token was deliberately retained so the user can retry. Never delete OAuth client configuration, channel settings, or drafts as part of disconnect.
 
 ## Resolve the video and preferences
 
@@ -31,14 +38,14 @@ For every target language:
 - Preserve URLs, timestamps, chapter lines, handles, product names, coupon codes, and intentional formatting.
 - Localize hashtags only when the localized form is natural and useful.
 - Do not invent claims, names, dates, links, or calls to action absent from the source.
-- Keep titles at most 100 Unicode characters and descriptions at most 5,000 Unicode characters.
+- Keep titles at most 100 Unicode characters and descriptions at most 5,000 UTF-8 bytes. Do not use `<` or `>` in either field.
 - Preserve the source language localization unless the user explicitly selects that language as a target.
 
 After generation, call `youtube_save_draft`. Save every generated language and mark only the languages the user currently wants to publish as selected.
 
 ## Review and revise
 
-Show a compact review grouped by language with title, description, and character counts. Identify unchanged existing localizations and proposed overwrites. Let the user edit or regenerate individual languages without regenerating approved ones, then update the draft.
+Show a compact review grouped by language with title, description, title character count, and description character/byte counts. Identify unchanged existing localizations and proposed overwrites. Let the user edit or regenerate individual languages without regenerating approved ones, then update the draft.
 
 Do not save to YouTube during generation or revision.
 

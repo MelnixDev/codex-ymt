@@ -25,11 +25,13 @@ SERVER_NAME = "codex-ymt"
 SERVER_VERSION = "0.1.0"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 YOUTUBE_API = "https://www.googleapis.com/youtube/v3"
 YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
 TITLE_LIMIT = 100
 DESCRIPTION_LIMIT = 5000
 PENDING_TTL_SECONDS = 15 * 60
+DISCONNECT_TTL_SECONDS = 5 * 60
 
 
 class ToolFailure(RuntimeError):
@@ -69,8 +71,12 @@ def read_json(path: Path, default: Any) -> Any:
             return json.load(handle)
     except FileNotFoundError:
         return default
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ToolFailure(f"Could not read local data at {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ToolFailure("Could not read local JSON data because it is invalid.") from exc
+    except OSError as exc:
+        raise ToolFailure(
+            f"Could not read local JSON data ({exc.__class__.__name__})."
+        ) from exc
 
 
 def canonical_hash(payload: Any) -> str:
@@ -116,6 +122,7 @@ class YouTubeLocalizer:
         self._auth: dict[str, Any] | None = None
         self._auth_server: ThreadingHTTPServer | None = None
         self._pending: dict[str, dict[str, Any]] = {}
+        self._disconnect_pending: dict[str, dict[str, Any]] = {}
 
     # OAuth
 
@@ -128,40 +135,51 @@ class YouTubeLocalizer:
         if not client_id or not client_secret:
             raise ToolFailure(
                 "Google OAuth is not configured. Create a Desktop app OAuth client, "
-                "then call youtube_configure_oauth with its client ID and client secret."
+                "then call youtube_configure_oauth with the local path to its JSON file, "
+                "or configure YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET."
             )
         return {"client_id": client_id, "client_secret": client_secret}
 
     def configure_oauth(self, args: dict[str, Any]) -> dict[str, Any]:
         client_json_path = str(args.get("client_json_path", "")).strip()
-        if client_json_path:
-            source_path = Path(client_json_path).expanduser()
-            source = read_json(source_path, None)
-            if not isinstance(source, dict):
-                raise ToolFailure("The OAuth client JSON file is missing or invalid.")
-            client = source.get("installed") or source.get("web")
-            if not isinstance(client, dict):
+        if not client_json_path:
+            raise ToolFailure(
+                "client_json_path is required. Provide the local path to a Google Desktop OAuth JSON file."
+            )
+        source_path = Path(client_json_path).expanduser()
+        source = read_json(source_path, None)
+        if not isinstance(source, dict):
+            raise ToolFailure("The OAuth client JSON file is missing or invalid.")
+        client = source.get("installed")
+        if not isinstance(client, dict):
+            if isinstance(source.get("web"), dict):
                 raise ToolFailure(
-                    "The OAuth JSON has no 'installed' client. Create a Desktop app OAuth client."
+                    "Web OAuth clients are not supported. Create a Desktop app OAuth client."
                 )
-            client_id = str(client.get("client_id", "")).strip()
-            client_secret = str(client.get("client_secret", "")).strip()
-        else:
-            client_id = str(args.get("client_id", "")).strip()
-            client_secret = str(args.get("client_secret", "")).strip()
+            raise ToolFailure(
+                "The OAuth JSON has no 'installed' client. Create a Desktop app OAuth client."
+            )
+        client_id = str(client.get("client_id", "")).strip()
+        client_secret = str(client.get("client_secret", "")).strip()
         if not client_id.endswith(".apps.googleusercontent.com"):
             raise ToolFailure("client_id must be a Google OAuth client ID.")
         if len(client_secret) < 8:
             raise ToolFailure("client_secret is missing or invalid.")
+        existing = read_json(self.credentials_path, {})
+        existing_client_id = existing.get("client_id") if isinstance(existing, dict) else None
+        token_cleared = self.token_path.exists() and existing_client_id != client_id
         atomic_write_json(
             self.credentials_path,
             {"client_id": client_id, "client_secret": client_secret},
         )
+        if token_cleared:
+            self._delete_local_token()
         return {
             "configured": True,
-            "client_id_hint": f"…{client_id[-28:]}",
-            "source": "local_json_file" if client_json_path else "direct_values",
+            "source": "local_json_file",
             "stored_locally": True,
+            "token_cleared": token_cleared,
+            "reconnect_required": token_cleared or not self.token_path.exists(),
         }
 
     def auth_start(self, _args: dict[str, Any]) -> dict[str, Any]:
@@ -211,7 +229,7 @@ class YouTubeLocalizer:
                     auth_state["error"] = "Google returned no authorization code."
                     status = 400
                 body = (
-                    "YouTube Localizer is connected. Return to Codex."
+                    "Codex YMT is connected. Return to Codex."
                     if status == 200
                     else f"Authorization failed: {auth_state['error']}"
                 ).encode("utf-8")
@@ -350,11 +368,16 @@ class YouTubeLocalizer:
             raw = exc.read().decode("utf-8", errors="replace")
             reason = None
             try:
-                detail = json.loads(raw).get("error", {})
-                message = detail.get("message") or raw
-                errors = detail.get("errors", [])
-                if errors and isinstance(errors[0], dict):
-                    reason = errors[0].get("reason")
+                payload = json.loads(raw)
+                detail = payload.get("error", {})
+                if isinstance(detail, dict):
+                    message = detail.get("message") or raw
+                    errors = detail.get("errors", [])
+                    if errors and isinstance(errors[0], dict):
+                        reason = errors[0].get("reason")
+                else:
+                    reason = str(detail) if detail else None
+                    message = payload.get("error_description") or reason or raw
             except json.JSONDecodeError:
                 message = raw or str(exc)
             raise GoogleApiFailure(exc.code, str(message), reason) from exc
@@ -369,6 +392,94 @@ class YouTubeLocalizer:
         if not isinstance(parsed, dict):
             raise ToolFailure("Google returned an unexpected response.")
         return parsed
+
+    def prepare_disconnect(self, _args: dict[str, Any]) -> dict[str, Any]:
+        token_data = read_json(self.token_path, {})
+        revoke_token = token_data.get("refresh_token") or token_data.get("access_token")
+        if not revoke_token:
+            return {
+                "ready": False,
+                "connected": False,
+                "message": "No local Google token is stored. Nothing was changed.",
+            }
+        confirmation_token = secrets.token_urlsafe(24)
+        self._disconnect_pending[confirmation_token] = {
+            "expires_at": time.time() + DISCONNECT_TTL_SECONDS,
+            "token_fingerprint": canonical_hash(str(revoke_token)),
+        }
+        return {
+            "ready": True,
+            "connected": True,
+            "effects": [
+                "Revoke the stored Google token.",
+                "Delete the local oauth-token.json file.",
+            ],
+            "preserved": [
+                "OAuth client configuration",
+                "channel settings",
+                "translation drafts",
+            ],
+            "confirmation_token": confirmation_token,
+            "confirmation_expires_in_seconds": DISCONNECT_TTL_SECONDS,
+            "warning": "Commit only after the user explicitly approves this disconnect preview.",
+        }
+
+    def commit_disconnect(self, args: dict[str, Any]) -> dict[str, Any]:
+        confirmation_token = str(args.get("confirmation_token", "")).strip()
+        pending = self._disconnect_pending.get(confirmation_token)
+        if pending is None:
+            raise ToolFailure(
+                "Disconnect confirmation token is missing or unknown. Prepare a new disconnect preview."
+            )
+        if pending["expires_at"] < time.time():
+            self._disconnect_pending.pop(confirmation_token, None)
+            raise ToolFailure(
+                "Disconnect confirmation token expired. Prepare and approve a new preview."
+            )
+
+        token_data = read_json(self.token_path, {})
+        revoke_token = token_data.get("refresh_token") or token_data.get("access_token")
+        if not revoke_token:
+            self._disconnect_pending.pop(confirmation_token, None)
+            return {
+                "disconnected": True,
+                "remote_revoked": False,
+                "local_token_deleted": False,
+                "already_disconnected": True,
+            }
+        if canonical_hash(str(revoke_token)) != pending["token_fingerprint"]:
+            self._disconnect_pending.pop(confirmation_token, None)
+            raise ToolFailure(
+                "The Google connection changed after the disconnect preview. "
+                "Nothing was revoked. Prepare and approve a new preview."
+            )
+
+        already_revoked = False
+        try:
+            self._form_request(GOOGLE_REVOKE_URL, {"token": revoke_token})
+        except GoogleApiFailure as exc:
+            if exc.reason == "invalid_token":
+                already_revoked = True
+            else:
+                raise
+
+        self._delete_local_token()
+        self._disconnect_pending.pop(confirmation_token, None)
+        return {
+            "disconnected": True,
+            "remote_revoked": not already_revoked,
+            "local_token_deleted": True,
+            "already_revoked": already_revoked,
+            "preserved": ["oauth-client.json", "channel settings", "translation drafts"],
+        }
+
+    def _delete_local_token(self) -> None:
+        try:
+            self.token_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ToolFailure(
+                f"Could not delete the local OAuth token ({exc.__class__.__name__})."
+            ) from exc
 
     def _api(
         self,
@@ -773,7 +884,7 @@ def tool_definitions() -> list[dict[str, Any]]:
     return [
         {
             "name": "youtube_configure_oauth",
-            "description": "Read a Google Desktop OAuth client JSON locally (preferred), or store a supplied client ID and secret.",
+            "description": "Read and store a Google Desktop OAuth client from a local JSON file.",
             "inputSchema": {
                 **object_schema,
                 "properties": {
@@ -781,27 +892,54 @@ def tool_definitions() -> list[dict[str, Any]]:
                         "type": "string",
                         "description": "Local path to a downloaded Google Desktop OAuth client JSON file.",
                     },
-                    "client_id": {"type": "string"},
-                    "client_secret": {"type": "string"},
                 },
-                "anyOf": [
-                    {"required": ["client_json_path"]},
-                    {"required": ["client_id", "client_secret"]},
-                ],
+                "required": ["client_json_path"],
             },
-            "annotations": {"readOnlyHint": False, "openWorldHint": False},
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "openWorldHint": False,
+            },
         },
         {
             "name": "youtube_auth_start",
             "description": "Start Google OAuth and return a browser URL for the user to approve YouTube access.",
             "inputSchema": {**object_schema, "properties": {}},
-            "annotations": {"readOnlyHint": False, "openWorldHint": True},
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "openWorldHint": True,
+            },
         },
         {
             "name": "youtube_auth_status",
             "description": "Check local YouTube connection status and finish a pending OAuth callback.",
             "inputSchema": {**object_schema, "properties": {}},
-            "annotations": {"readOnlyHint": True, "openWorldHint": True},
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "openWorldHint": True,
+            },
+        },
+        {
+            "name": "youtube_prepare_disconnect",
+            "description": "Preview Google token revocation and local token deletion without changing anything.",
+            "inputSchema": {**object_schema, "properties": {}},
+            "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        },
+        {
+            "name": "youtube_commit_disconnect",
+            "description": "Revoke Google access and delete the local token after explicit approval of a disconnect preview.",
+            "inputSchema": {
+                **object_schema,
+                "properties": {"confirmation_token": {"type": "string"}},
+                "required": ["confirmation_token"],
+            },
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "openWorldHint": True,
+            },
         },
         {
             "name": "youtube_list_videos",
@@ -845,7 +983,11 @@ def tool_definitions() -> list[dict[str, Any]]:
                 },
                 "required": ["target_languages"],
             },
-            "annotations": {"readOnlyHint": False, "openWorldHint": False},
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "openWorldHint": False,
+            },
         },
         {
             "name": "youtube_save_draft",
@@ -859,7 +1001,11 @@ def tool_definitions() -> list[dict[str, Any]]:
                 },
                 "required": ["video_id", "translations"],
             },
-            "annotations": {"readOnlyHint": False, "openWorldHint": True},
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "openWorldHint": True,
+            },
         },
         {
             "name": "youtube_get_draft",
@@ -894,7 +1040,11 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "properties": {"confirmation_token": {"type": "string"}},
                 "required": ["confirmation_token"],
             },
-            "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "openWorldHint": True,
+            },
         },
     ]
 
@@ -904,6 +1054,8 @@ def dispatch(server: YouTubeLocalizer, name: str, args: dict[str, Any]) -> dict[
         "youtube_configure_oauth": server.configure_oauth,
         "youtube_auth_start": server.auth_start,
         "youtube_auth_status": server.auth_status,
+        "youtube_prepare_disconnect": server.prepare_disconnect,
+        "youtube_commit_disconnect": server.commit_disconnect,
         "youtube_list_videos": server.list_videos,
         "youtube_get_video": server.get_video,
         "youtube_get_channel_settings": server.get_channel_settings,
