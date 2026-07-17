@@ -1,0 +1,45 @@
+{
+  "name": "codex-ymt",
+  "version": "0.0.1",
+  "description": "A Codex plugin for translating, reviewing, and safely publishing YouTube video titles and descriptions.",
+  "author": {
+    "name": "MelnixDev",
+    "url": "https://github.com/MelnixDev"
+  },
+  "homepage": "https://github.com/MelnixDev/codex-ymt",
+  "repository": "https://github.com/MelnixDev/codex-ymt",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "codex-plugin",
+    "youtube",
+    "youtube-seo",
+    "metadata",
+    "localization",
+    "translation",
+    "creator-tools",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Codex YMT",
+    "shortDescription": "YouTube Metadata Translator for Codex.",
+    "longDescription": "Translate YouTube titles and descriptions into multiple languages with Codex, review every result, preserve existing localizations, and publish only explicitly approved changes.",
+    "developerName": "MelnixDev",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "websiteURL": "https://github.com/MelnixDev/codex-ymt",
+    "privacyPolicyURL": "https://github.com/MelnixDev/codex-ymt/blob/main/PRIVACY.md",
+    "brandColor": "#FF0033",
+    "defaultPrompt": [
+      "Translate my latest YouTube title and description.",
+      "Localize this video's metadata into my default languages.",
+      "Show my saved YouTube localization draft."
+    ]
+  }
+}

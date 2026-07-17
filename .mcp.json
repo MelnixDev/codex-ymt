@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "codex-ymt": {
+      "command": "python3",
+      "args": [
+        "${PLUGIN_ROOT}/scripts/youtube_mcp.py"
+      ]
+    }
+  }
+}

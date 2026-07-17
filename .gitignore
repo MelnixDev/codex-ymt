@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# macOS and editors
+.DS_Store
+.idea/
+.vscode/
+
+# Local environment and credentials
+.env
+.env.*
+client_secret*.json
+oauth-client.json
+oauth-token.json
+channel-settings.json
+drafts/
+
+# Codex YMT local data or exports
+.codex-ymt-data/
+localizations-*.json
