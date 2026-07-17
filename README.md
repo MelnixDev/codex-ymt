@@ -37,6 +37,8 @@ It is designed for multilingual YouTube metadata and creator workflows. It can h
 - Shows exact additions and overwrites before publishing.
 - Preserves existing YouTube localizations that you did not select.
 - Refuses to publish if the video changed after the preview was prepared.
+- Uses the video's ETag and `If-Match` to reject concurrent changes during the final API request.
+- Revokes Google access through a separate preview-and-confirm disconnect flow.
 - Uses your own Google OAuth client and has no separate plugin backend.
 - Works in English or Ukrainian conversations.
 - Requires no separate OpenAI or Anthropic API key; translation is performed by Codex.
@@ -57,7 +59,7 @@ Publishing is split into two server-enforced operations:
 1. `youtube_prepare_update` returns the exact diff and a short-lived confirmation token without changing YouTube.
 2. `youtube_commit_update` accepts that token and writes the reviewed language selection.
 
-Before commit, the plugin fetches the video again and refuses to write if its title, description, default language, or localizations changed after preview. The update merges existing, unselected localizations because YouTube requires localization updates to include the existing localized data.
+Before commit, the plugin fetches the video again and refuses to write if its title, description, default language, localizations, or ETag changed after preview. The final request includes `If-Match`, so YouTube can reject a change that races with the commit itself. The update merges existing, unselected localizations because YouTube requires localization updates to include the existing localized data.
 
 > [!WARNING]
 > Google describes the required `youtube.force-ssl` OAuth scope broadly: it can authorize viewing, editing, and permanently deleting YouTube videos and other channel data. Codex YMT does **not** expose deletion, upload, visibility, comment, or caption tools, but a stolen token would still carry the underlying Google scope. Keep the OAuth JSON and local token files private, and [revoke access in your Google Account](https://myaccount.google.com/connections) if they may have been exposed.
@@ -99,12 +101,14 @@ Each creator uses their own Google Cloud project and OAuth client. Codex YMT doe
 2. Open the [YouTube Data API v3 library page](https://console.cloud.google.com/apis/library/youtube.googleapis.com) and enable the API for that project.
 3. Configure the [Google Auth Platform](https://console.cloud.google.com/auth/overview). For personal testing, keep the app in testing and add your Google account as a test user.
 4. Open [OAuth clients](https://console.cloud.google.com/auth/clients), create a client, and select **Desktop app** as the application type.
-5. Download the OAuth client JSON and keep it outside this repository.
+5. Download the OAuth client JSON and keep it outside this repository. Web application OAuth clients are not supported.
 6. In Codex, ask: `Connect Codex YMT to YouTube.`
 7. When asked, provide only the local filesystem path to the downloaded JSON. Do not paste its contents into the conversation.
 8. Open the Google authorization URL returned by the plugin, choose the channel-owning Google account, and approve access.
 
 The plugin uses PKCE, a temporary `127.0.0.1` loopback callback, and offline access so it can refresh the local token. The authorization URL is opened in your normal browser; the plugin never receives your Google password.
+
+For a headless setup, `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` may be configured in the MCP process environment. Codex YMT does not accept client secrets as tool arguments, which keeps them out of the Codex task and tool history.
 
 ## First safe run
 
@@ -159,6 +163,10 @@ codex plugin add codex-ymt@codex-ymt
 
 Restart the desktop app and use a new task after updating.
 
+### Upgrading from v0.0.1
+
+`youtube_configure_oauth` no longer accepts direct `client_id` or `client_secret` arguments. Provide `client_json_path`, or configure the environment variables documented above. Reconfiguring with a different OAuth client removes the incompatible local token and requires Google authorization again; reconfiguring the same client preserves its token.
+
 Remove the installed plugin:
 
 ```bash
@@ -171,7 +179,9 @@ Optionally remove its marketplace source:
 codex plugin marketplace remove codex-ymt
 ```
 
-Uninstalling the plugin does not automatically revoke Google authorization or delete local data. See the next section for a complete disconnect.
+Before uninstalling, ask Codex to disconnect YouTube. Codex YMT will preview the exact effect, request confirmation, revoke the Google token, and delete only the local token file. If remote revocation fails, the local token is retained so the operation can be retried.
+
+Uninstalling the plugin itself does not automatically revoke Google authorization or delete local data. See the next section for a complete disconnect or manual fallback.
 
 ## Privacy and local data
 
@@ -185,9 +195,12 @@ Where supported, files are written atomically with owner-only permissions (`0600
 
 To disconnect completely:
 
-1. [Revoke the Google connection](https://myaccount.google.com/connections).
-2. Uninstall the plugin.
-3. Delete the plugin data directory shown by your Codex installation, or the fallback `~/.config/codex-ymt/` directory.
+1. Ask Codex: `Disconnect Codex YMT from YouTube.`
+2. Review the disconnect preview and explicitly approve it.
+3. Uninstall the plugin if you no longer need it.
+4. Optionally delete the plugin data directory shown by your Codex installation, or the fallback `~/.config/codex-ymt/` directory, to remove OAuth client configuration, settings, and drafts.
+
+If the plugin cannot run, [revoke the Google connection manually](https://myaccount.google.com/connections) before deleting local files.
 
 Read [PRIVACY.md](PRIVACY.md) before using the plugin with private or commercially sensitive video metadata.
 
@@ -199,12 +212,15 @@ Read [PRIVACY.md](PRIVACY.md) before using the plugin with private or commercial
 | `python3` is unavailable | Install Python 3.10+ and verify `python3 --version`. |
 | `access_denied` | Add the Google account under OAuth test users and retry consent. |
 | `redirect_uri_mismatch` | Recreate the OAuth client as **Desktop app**, not Web application. |
+| Web OAuth client rejected | Download credentials for a **Desktop app** client; web clients are intentionally unsupported. |
 | `accessNotConfigured` | Enable YouTube Data API v3 in the same project as the OAuth client. |
 | `insufficientPermissions` | Reconnect and approve the requested YouTube scope. |
 | No refresh token | Revoke the Google connection, then connect again to trigger fresh consent. |
 | Video cannot be found | Confirm the connected account can edit that exact channel and video. |
 | Preview became stale | Fetch the video again, prepare a new diff, and approve the new preview. |
-| YouTube rejects a translation | Keep titles at 100 characters or fewer and descriptions at 5,000 characters or fewer. |
+| YouTube rejects a translation | Keep titles at 100 Unicode characters or fewer, descriptions at 5,000 UTF-8 bytes or fewer, and remove `<` or `>`. |
+| Update preview became stale during commit | Another client changed the video. Fetch it again, prepare a new diff, and approve that new preview. |
+| Disconnect revocation failed | The local token was retained. Check connectivity and prepare a new disconnect preview. |
 
 YouTube API quota and Google account policies still apply.
 
@@ -222,7 +238,7 @@ Clone the repository and run the dependency-free offline tests:
 python3 scripts/test_youtube_mcp.py
 ```
 
-The tests cover existing-localization preservation, confirmation-token gating, stale-preview rejection, title and description limits, local OAuth JSON import, and MCP initialization.
+The tests cover existing-localization preservation, confirmation-token gating, ETag concurrency protection, UTF-8 metadata limits, Desktop OAuth validation, safe token reset/revocation, path redaction, and MCP initialization.
 
 Validate the plugin manifest with the Codex `plugin-creator` validator when that system skill is available:
 
@@ -236,6 +252,7 @@ python3 /path/to/plugin-creator/scripts/validate_plugin.py .
 - [Codex CLI](https://developers.openai.com/codex/cli)
 - [YouTube Data API v3 overview](https://developers.google.com/youtube/v3/getting-started)
 - [OAuth 2.0 for mobile and desktop apps](https://developers.google.com/youtube/v3/guides/auth/installed-apps)
+- [Google token revocation endpoint](https://developers.google.com/identity/openid-connect/reference#revocation_endpoint)
 - [`videos.update` reference](https://developers.google.com/youtube/v3/docs/videos/update)
 - [YouTube Data API revision history](https://developers.google.com/youtube/v3/revision_history)
 - [Google OAuth app verification](https://support.google.com/cloud/answer/13461325?hl=en)

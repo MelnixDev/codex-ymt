@@ -33,14 +33,17 @@ Google's account policies, API quota, and privacy terms apply.
 
 Video titles, descriptions, existing localizations, channel instructions, and generated translations appear in the Codex task so Codex can perform the translation and review workflow. OpenAI's terms and privacy controls for the user's Codex account apply to that processing.
 
-The Google OAuth client secret and refresh token should never be pasted into the conversation. Use the local OAuth JSON path workflow instead.
+The Google OAuth client secret and refresh token should never be pasted into the conversation. Use the local OAuth JSON path workflow instead. Codex YMT does not accept a client secret as an MCP tool argument; headless environments can provide credentials through process environment variables.
+
+Configuring a different OAuth client removes an existing local token because that token cannot be safely reused with the new client. Configuring the same client preserves its token.
 
 ## Delete or revoke access
 
 To disconnect completely:
 
-1. [Revoke the application's access](https://myaccount.google.com/connections) from the Google Account security settings.
-2. Disable or uninstall the Codex YMT plugin.
-3. Delete the plugin's local data directory, or the fallback `~/.config/codex-ymt/` directory.
+1. Ask Codex YMT to prepare a disconnect preview.
+2. Review and approve the preview. The plugin revokes the Google token and deletes only `oauth-token.json`; OAuth client configuration, channel settings, and drafts remain.
+3. Disable or uninstall the Codex YMT plugin.
+4. Delete the plugin's local data directory, or the fallback `~/.config/codex-ymt/` directory, if you also want to remove the preserved local data.
 
-Deleting only the local files does not revoke an already issued Google token; revoke access at Google as well.
+If remote revocation fails, the plugin retains the local token so the operation can be retried. If the plugin cannot run, [revoke access manually](https://myaccount.google.com/connections) before deleting local files. Deleting only local files does not revoke an issued Google token.
