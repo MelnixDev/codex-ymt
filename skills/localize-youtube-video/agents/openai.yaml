@@ -1,0 +1,7 @@
+interface:
+  display_name: "Codex YMT"
+  short_description: "Translate YouTube metadata with review"
+  default_prompt: "Use $localize-youtube-video to translate a YouTube title and description, then let me review before saving."
+
+policy:
+  allow_implicit_invocation: true
