@@ -1,0 +1,20 @@
+{
+  "name": "codex-ymt",
+  "interface": {
+    "displayName": "Codex YMT"
+  },
+  "plugins": [
+    {
+      "name": "codex-ymt",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/MelnixDev/codex-ymt.git"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
