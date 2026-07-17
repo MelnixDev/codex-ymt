@@ -22,7 +22,7 @@ from urllib.request import Request, urlopen
 
 
 SERVER_NAME = "codex-ymt"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.0.2"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"

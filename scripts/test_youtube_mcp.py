@@ -13,6 +13,7 @@ from pathlib import Path
 
 from youtube_mcp import (
     GOOGLE_REVOKE_URL,
+    SERVER_VERSION,
     GoogleApiFailure,
     ToolFailure,
     YouTubeLocalizer,
@@ -336,6 +337,12 @@ class ProtocolTests(unittest.TestCase):
     def test_tool_names_are_unique(self) -> None:
         names = [tool["name"] for tool in tool_definitions()]
         self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(len(names), 13)
+
+    def test_server_version_matches_plugin_manifest(self) -> None:
+        manifest_path = Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(SERVER_VERSION, manifest["version"])
 
     def test_write_tool_annotations_are_conservative(self) -> None:
         tools = {tool["name"]: tool for tool in tool_definitions()}
@@ -369,7 +376,8 @@ class ProtocolTests(unittest.TestCase):
         )
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "codex-ymt")
-        self.assertGreaterEqual(len(responses[1]["result"]["tools"]), 10)
+        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], SERVER_VERSION)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 13)
 
 
 if __name__ == "__main__":
