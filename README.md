@@ -3,6 +3,7 @@
 **YouTube Metadata Translator for Codex**
 
 [![Release](https://img.shields.io/github/v/release/MelnixDev/codex-ymt)](https://github.com/MelnixDev/codex-ymt/releases)
+[![Tests](https://github.com/MelnixDev/codex-ymt/actions/workflows/tests.yml/badge.svg)](https://github.com/MelnixDev/codex-ymt/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)](https://www.python.org/)
 
