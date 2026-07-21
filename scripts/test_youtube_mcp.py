@@ -674,7 +674,7 @@ class GoogleErrorTests(unittest.TestCase):
     def test_network_error_does_not_expose_low_level_details(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             server = YouTubeLocalizer(Path(temporary))
-            private_detail = "/Users/example/private-network-config"
+            private_detail = "sensitive low-level network detail"
             with patch("youtube_mcp.urlopen", side_effect=URLError(private_detail)):
                 with self.assertRaises(ToolFailure) as raised:
                     server._open_json(Request("https://www.googleapis.com/youtube/v3/videos"))

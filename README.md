@@ -168,6 +168,10 @@ Restart the desktop app and use a new task after updating.
 
 `youtube_configure_oauth` no longer accepts direct `client_id` or `client_secret` arguments. Provide `client_json_path`, or configure the environment variables documented above. Reconfiguring with a different OAuth client removes the incompatible local token and requires Google authorization again; reconfiguring the same client preserves its token.
 
+### Upgrading from v0.0.2
+
+No local data migration or Google reconnection is required. Version `0.0.3` keeps the same MCP tools and successful response shapes while adding regression coverage, defensive input validation, and clearer Google API errors.
+
 Remove the installed plugin:
 
 ```bash
@@ -249,6 +253,12 @@ Validate the plugin manifest with the Codex `plugin-creator` validator when that
 
 ```bash
 python3 /path/to/plugin-creator/scripts/validate_plugin.py .
+```
+
+Run the dependency-free repository metadata checks used by CI:
+
+```bash
+python3 scripts/validate_repository.py
 ```
 
 ## Official documentation

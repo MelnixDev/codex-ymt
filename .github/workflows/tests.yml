@@ -44,20 +44,5 @@ jobs:
       - name: Compile Python sources
         run: python -m py_compile scripts/youtube_mcp.py scripts/test_youtube_mcp.py
 
-      - name: Validate JSON files
-        shell: bash
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          files = (
-              Path(".codex-plugin/plugin.json"),
-              Path(".mcp.json"),
-              Path(".agents/plugins/marketplace.json"),
-          )
-          for path in files:
-              with path.open(encoding="utf-8") as file:
-                  json.load(file)
-              print(f"Valid JSON: {path}")
-          PY
+      - name: Validate plugin, skill, and marketplace metadata
+        run: python scripts/validate_repository.py
