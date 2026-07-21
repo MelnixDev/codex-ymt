@@ -212,6 +212,7 @@ Read [PRIVACY.md](PRIVACY.md) before using the plugin with private or commercial
 | Plugin does not appear | Run `codex plugin list`, restart the desktop app, and start a new task. |
 | `python3` is unavailable | Install Python 3.10+ and verify `python3 --version`. |
 | `access_denied` | Add the Google account under OAuth test users and retry consent. |
+| Connection expires after seven days | If an external OAuth app remains in **Testing**, Google may issue a refresh token that expires in seven days. Reconnect, or move the consent screen to the appropriate publishing status after reviewing Google's requirements. |
 | `redirect_uri_mismatch` | Recreate the OAuth client as **Desktop app**, not Web application. |
 | Web OAuth client rejected | Download credentials for a **Desktop app** client; web clients are intentionally unsupported. |
 | `accessNotConfigured` | Enable YouTube Data API v3 in the same project as the OAuth client. |
@@ -222,6 +223,7 @@ Read [PRIVACY.md](PRIVACY.md) before using the plugin with private or commercial
 | YouTube rejects a translation | Keep titles at 100 Unicode characters or fewer, descriptions at 5,000 UTF-8 bytes or fewer, and remove `<` or `>`. |
 | Update preview became stale during commit | Another client changed the video. Fetch it again, prepare a new diff, and approve that new preview. |
 | Disconnect revocation failed | The local token was retained. Check connectivity and prepare a new disconnect preview. |
+| YouTube API quota is exhausted | Wait for the quota reset or review the project quota in Google Cloud. A `videos.update` call costs 50 quota units. |
 
 YouTube API quota and Google account policies still apply.
 
@@ -239,7 +241,9 @@ Clone the repository and run the dependency-free offline tests:
 python3 scripts/test_youtube_mcp.py
 ```
 
-The tests cover existing-localization preservation, confirmation-token gating, ETag concurrency protection, UTF-8 metadata limits, Desktop OAuth validation, safe token reset/revocation, path redaction, and MCP initialization.
+The tests cover existing-localization preservation, one-time confirmation tokens, ETag concurrency protection, UTF-8 metadata limits, Desktop OAuth validation and refresh, safe token reset/revocation, upload-list pagination, default-language writes, path redaction, defensive MCP input handling, and protocol initialization.
+
+Before a release, follow the [optional live smoke-test checklist](docs/release-checklist.md). Its read-only and preview checks can be completed without writing to YouTube. The isolated live-write step requires separate, explicit approval and must use an unlisted test video.
 
 Validate the plugin manifest with the Codex `plugin-creator` validator when that system skill is available:
 
@@ -257,6 +261,8 @@ python3 /path/to/plugin-creator/scripts/validate_plugin.py .
 - [`videos.update` reference](https://developers.google.com/youtube/v3/docs/videos/update)
 - [YouTube Data API revision history](https://developers.google.com/youtube/v3/revision_history)
 - [Google OAuth app verification](https://support.google.com/cloud/answer/13461325?hl=en)
+- [Google OAuth refresh token expiration](https://developers.google.com/identity/protocols/oauth2#expiration)
+- [YouTube Data API quota costs](https://developers.google.com/youtube/v3/determine_quota_cost)
 
 ## Disclaimer
 
