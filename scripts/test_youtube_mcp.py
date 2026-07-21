@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,24 @@ VIDEO = {
     "url": "https://www.youtube.com/watch?v=abc123xyz00",
 }
 
+API_VIDEO = {
+    "id": VIDEO["id"],
+    "etag": VIDEO["etag"],
+    "snippet": {
+        "channelId": VIDEO["channelId"],
+        "channelTitle": VIDEO["channelTitle"],
+        "title": VIDEO["title"],
+        "description": VIDEO["description"],
+        "publishedAt": "2026-07-01T12:00:00Z",
+        "defaultLanguage": VIDEO["defaultLanguage"],
+        "defaultAudioLanguage": VIDEO["defaultAudioLanguage"],
+        "categoryId": VIDEO["categoryId"],
+        "tags": VIDEO["tags"],
+    },
+    "status": {"privacyStatus": "unlisted"},
+    "localizations": VIDEO["localizations"],
+}
+
 
 class FakeYouTubeLocalizer(YouTubeLocalizer):
     def __init__(self, root: Path) -> None:
@@ -49,6 +68,7 @@ class FakeYouTubeLocalizer(YouTubeLocalizer):
         self.update_error: Exception | None = None
         self.form_requests: list[dict] = []
         self.form_error: Exception | None = None
+        self.form_response: dict = {}
 
     def _get_video(self, _video_id: str) -> dict:
         return json.loads(json.dumps(self.video))
@@ -78,7 +98,62 @@ class FakeYouTubeLocalizer(YouTubeLocalizer):
         self.form_requests.append({"url": url, "values": values})
         if self.form_error:
             raise self.form_error
-        return {}
+        return json.loads(json.dumps(self.form_response))
+
+
+class ReadYouTubeLocalizer(YouTubeLocalizer):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        second_video = json.loads(json.dumps(API_VIDEO))
+        second_video["id"] = "second98765"
+        second_video["snippet"]["title"] = "Second video"
+        self.api_videos = {
+            API_VIDEO["id"]: json.loads(json.dumps(API_VIDEO)),
+            second_video["id"]: second_video,
+        }
+        self.calls: list[dict] = []
+
+    def _api(
+        self,
+        resource: str,
+        params: dict,
+        method: str = "GET",
+        body: dict | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict:
+        self.calls.append(
+            {
+                "resource": resource,
+                "params": params,
+                "method": method,
+                "body": body,
+                "extra_headers": extra_headers,
+            }
+        )
+        if resource == "channels":
+            return {
+                "items": [
+                    {
+                        "id": VIDEO["channelId"],
+                        "snippet": {"title": VIDEO["channelTitle"]},
+                        "contentDetails": {
+                            "relatedPlaylists": {"uploads": "uploads-playlist"}
+                        },
+                    }
+                ]
+            }
+        if resource == "playlistItems":
+            return {
+                "items": [
+                    {"contentDetails": {"videoId": API_VIDEO["id"]}},
+                    {"contentDetails": {"videoId": "second98765"}},
+                ],
+                "nextPageToken": "next-page",
+            }
+        if resource == "videos":
+            requested = str(params["id"]).split(",")
+            return {"items": [self.api_videos[video_id] for video_id in reversed(requested)]}
+        raise AssertionError(f"Unexpected API resource: {resource}")
 
 
 class UpdateTests(unittest.TestCase):
@@ -135,6 +210,47 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(body["localizations"]["de"], VIDEO["localizations"]["de"])
         self.assertIn("uk", body["localizations"])
         self.assertEqual(self.server.sent[0]["extra_headers"], {"If-Match": VIDEO["etag"]})
+
+    def test_successful_update_confirmation_is_one_time(self) -> None:
+        preview = self.server.prepare_update(
+            {
+                "video_id": VIDEO["id"],
+                "translations": {"uk": {"title": "Нове", "description": "Новий опис"}},
+            }
+        )
+        token = preview["confirmation_token"]
+        self.server.commit_update({"confirmation_token": token})
+        with self.assertRaisesRegex(ToolFailure, "missing or unknown"):
+            self.server.commit_update({"confirmation_token": token})
+        self.assertEqual(len(self.server.sent), 1)
+
+    def test_default_language_update_preserves_safe_snippet_fields(self) -> None:
+        self.server.video["defaultLanguage"] = None
+        self.server.video["defaultAudioLanguage"] = "en"
+        preview = self.server.prepare_update(
+            {
+                "video_id": VIDEO["id"],
+                "source_language": "en",
+                "translations": {"uk": {"title": "Нове", "description": "Новий опис"}},
+            }
+        )
+        self.assertEqual(preview["default_language_change"], {"from": None, "to": "en"})
+        self.server.commit_update({"confirmation_token": preview["confirmation_token"]})
+
+        request = self.server.sent[0]
+        self.assertEqual(request["params"], {"part": "snippet,localizations"})
+        self.assertEqual(
+            request["body"]["snippet"],
+            {
+                "title": VIDEO["title"],
+                "description": VIDEO["description"],
+                "categoryId": VIDEO["categoryId"],
+                "defaultLanguage": "en",
+                "tags": VIDEO["tags"],
+                "defaultAudioLanguage": "en",
+            },
+        )
+        self.assertNotIn("status", request["body"])
 
     def test_title_limit(self) -> None:
         with self.assertRaisesRegex(ToolFailure, "limit is 100"):
@@ -256,6 +372,50 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(result["token_cleared"])
         self.assertTrue(self.server.token_path.exists())
 
+    def test_valid_access_token_does_not_refresh(self) -> None:
+        self.server.token_path.write_text(
+            json.dumps({"access_token": "current-token", "expires_at": time.time() + 600}),
+            encoding="utf-8",
+        )
+        self.assertEqual(self.server._access_token(), "current-token")
+        self.assertEqual(self.server.form_requests, [])
+
+    def test_expired_access_token_refreshes_and_preserves_refresh_token(self) -> None:
+        self.server.credentials_path.write_text(
+            json.dumps(
+                {
+                    "client_id": "demo.apps.googleusercontent.com",
+                    "client_secret": "secret-value",
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.server.token_path.write_text(
+            json.dumps(
+                {
+                    "access_token": "expired-token",
+                    "refresh_token": "refresh-value",
+                    "expires_at": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.server.form_response = {"access_token": "fresh-token", "expires_in": 3600}
+
+        self.assertEqual(self.server._access_token(), "fresh-token")
+        self.assertEqual(
+            self.server.form_requests[0]["values"],
+            {
+                "client_id": "demo.apps.googleusercontent.com",
+                "client_secret": "secret-value",
+                "refresh_token": "refresh-value",
+                "grant_type": "refresh_token",
+            },
+        )
+        stored = json.loads(self.server.token_path.read_text(encoding="utf-8"))
+        self.assertEqual(stored["refresh_token"], "refresh-value")
+        self.assertEqual(stat.S_IMODE(self.server.token_path.stat().st_mode), 0o600)
+
     def test_changed_oauth_client_clears_token(self) -> None:
         first = self._oauth_json("first.json", "first.apps.googleusercontent.com")
         second = self._oauth_json("second.json", "second.apps.googleusercontent.com")
@@ -272,6 +432,13 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaises(ToolFailure) as raised:
             self.server.configure_oauth({"client_json_path": str(path)})
         self.assertNotIn(str(path), str(raised.exception))
+
+    def test_corrupt_token_json_returns_safe_error(self) -> None:
+        self.server.token_path.write_text("not-json", encoding="utf-8")
+        with self.assertRaises(ToolFailure) as raised:
+            self.server._access_token()
+        self.assertNotIn(str(self.server.token_path), str(raised.exception))
+        self.assertIn("invalid", str(raised.exception))
 
     def test_prepare_disconnect_without_token_is_noop(self) -> None:
         result = self.server.prepare_disconnect({})
@@ -300,6 +467,15 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(self.server.token_path.exists())
         self.assertEqual(self.server.form_requests[0]["url"], GOOGLE_REVOKE_URL)
         self.assertEqual(self.server.form_requests[0]["values"], {"token": "token-value"})
+
+    def test_successful_disconnect_confirmation_is_one_time(self) -> None:
+        self.server.token_path.write_text('{"refresh_token":"token-value"}', encoding="utf-8")
+        preview = self.server.prepare_disconnect({})
+        token = preview["confirmation_token"]
+        self.server.commit_disconnect({"confirmation_token": token})
+        with self.assertRaisesRegex(ToolFailure, "missing or unknown"):
+            self.server.commit_disconnect({"confirmation_token": token})
+        self.assertEqual(len(self.server.form_requests), 1)
 
     def test_disconnect_rejects_changed_connection(self) -> None:
         self.server.token_path.write_text('{"refresh_token":"first-token"}', encoding="utf-8")
@@ -378,6 +554,32 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "codex-ymt")
         self.assertEqual(responses[0]["result"]["serverInfo"]["version"], SERVER_VERSION)
         self.assertEqual(len(responses[1]["result"]["tools"]), 13)
+
+
+class ReadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.server = ReadYouTubeLocalizer(Path(self.temp.name))
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_list_videos_preserves_upload_order_and_pagination(self) -> None:
+        result = self.server.list_videos({"max_results": 2, "page_token": "current-page"})
+        self.assertEqual(result["channel"], {"id": "channel-1", "title": "Demo"})
+        self.assertEqual([video["id"] for video in result["videos"]], [VIDEO["id"], "second98765"])
+        self.assertEqual(result["next_page_token"], "next-page")
+        playlist_call = next(call for call in self.server.calls if call["resource"] == "playlistItems")
+        self.assertEqual(playlist_call["params"]["pageToken"], "current-page")
+        self.assertEqual(playlist_call["params"]["maxResults"], 2)
+
+    def test_get_video_returns_write_safety_fields(self) -> None:
+        result = self.server.get_video({"video_id": VIDEO["id"]})
+        self.assertEqual(result["etag"], VIDEO["etag"])
+        self.assertEqual(result["privacyStatus"], "unlisted")
+        self.assertEqual(result["localizations"], VIDEO["localizations"])
+        self.assertEqual(result["tags"], VIDEO["tags"])
+        self.assertEqual(result["categoryId"], VIDEO["categoryId"])
 
 
 if __name__ == "__main__":
