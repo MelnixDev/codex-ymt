@@ -42,9 +42,57 @@ class GoogleApiFailure(ToolFailure):
     """A structured Google API error that callers can handle safely."""
 
     def __init__(self, status: int, message: str, reason: str | None = None) -> None:
-        super().__init__(f"Google API error ({status}): {message}")
         self.status = status
         self.reason = reason
+        self.api_message = message
+        super().__init__(friendly_google_error(status, message, reason))
+
+
+def friendly_google_error(status: int, message: str, reason: str | None) -> str:
+    """Return actionable, bounded Google errors without changing structured details."""
+
+    normalized_reason = (reason or "").strip()
+    quota_reasons = {
+        "dailyLimitExceeded",
+        "quotaExceeded",
+        "rateLimitExceeded",
+        "userRateLimitExceeded",
+    }
+    permission_reasons = {
+        "accountDelegationForbidden",
+        "forbidden",
+        "insufficientPermissions",
+        "youtubeSignupRequired",
+    }
+    metadata_reasons = {
+        "defaultLanguageNotSet",
+        "defaultLanguageNotSetError",
+        "invalidCategoryId",
+        "invalidDescription",
+        "invalidTitle",
+        "invalidVideoMetadata",
+        "localizationValidationError",
+    }
+
+    if status == 401 or normalized_reason in {"authError", "invalidCredentials"}:
+        return "Google authorization expired or was revoked. Reconnect YouTube and try again."
+    if status == 403 and normalized_reason in quota_reasons:
+        return "YouTube API quota is exhausted. Check the Google Cloud quota and try again later."
+    if status == 403 and normalized_reason in permission_reasons:
+        return (
+            "The connected Google account or OAuth scope cannot perform this YouTube operation. "
+            "Check the channel account and reconnect if needed."
+        )
+    if status == 400 and normalized_reason in metadata_reasons:
+        return (
+            "YouTube rejected the video metadata. Review the language codes, title, description, "
+            "and source language, then prepare a new preview."
+        )
+    if status == 404 or normalized_reason == "videoNotFound":
+        return "The YouTube video was not found or is no longer editable by this account."
+
+    safe_message = " ".join(str(message).split())[:500] or "Request failed."
+    return f"Google API error ({status}): {safe_message}"
 
 
 def utc_timestamp() -> str:
@@ -382,7 +430,9 @@ class YouTubeLocalizer:
                 message = raw or str(exc)
             raise GoogleApiFailure(exc.code, str(message), reason) from exc
         except URLError as exc:
-            raise ToolFailure(f"Could not reach Google API: {exc.reason}") from exc
+            raise ToolFailure(
+                "Could not reach Google API. Check network connectivity and try again."
+            ) from exc
         if not raw:
             return {}
         try:
@@ -511,7 +561,15 @@ class YouTubeLocalizer:
         return items[0]
 
     def list_videos(self, args: dict[str, Any]) -> dict[str, Any]:
-        max_results = int(args.get("max_results", 10))
+        raw_max_results = args.get("max_results", 10)
+        if isinstance(raw_max_results, bool) or (
+            isinstance(raw_max_results, float) and not raw_max_results.is_integer()
+        ):
+            raise ToolFailure("max_results must be an integer between 1 and 50.")
+        try:
+            max_results = int(raw_max_results)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ToolFailure("max_results must be an integer between 1 and 50.") from exc
         if not 1 <= max_results <= 50:
             raise ToolFailure("max_results must be between 1 and 50.")
         channel = self._channel()
@@ -1091,8 +1149,21 @@ def main() -> None:
                 continue
             method = message.get("method")
             request_id = message.get("id")
+            params = message.get("params", {})
+            if params is None:
+                params = {}
+            if not isinstance(params, dict):
+                if request_id is not None:
+                    send(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "error": {"code": -32602, "message": "Invalid params: expected an object."},
+                        }
+                    )
+                continue
             if method == "initialize" and request_id is not None:
-                requested_version = message.get("params", {}).get("protocolVersion")
+                requested_version = params.get("protocolVersion")
                 send(
                     {
                         "jsonrpc": "2.0",
@@ -1107,8 +1178,21 @@ def main() -> None:
             elif method == "tools/list" and request_id is not None:
                 send({"jsonrpc": "2.0", "id": request_id, "result": {"tools": tool_definitions()}})
             elif method == "tools/call" and request_id is not None:
-                params = message.get("params", {})
-                args = params.get("arguments") or {}
+                args = params.get("arguments", {})
+                if args is None:
+                    args = {}
+                if not isinstance(args, dict):
+                    send(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "error": {
+                                "code": -32602,
+                                "message": "Invalid params: tool arguments must be an object.",
+                            },
+                        }
+                    )
+                    continue
                 send(
                     {
                         "jsonrpc": "2.0",

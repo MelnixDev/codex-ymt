@@ -11,6 +11,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from urllib.error import URLError
+from urllib.request import Request
 
 from youtube_mcp import (
     GOOGLE_REVOKE_URL,
@@ -18,6 +21,7 @@ from youtube_mcp import (
     GoogleApiFailure,
     ToolFailure,
     YouTubeLocalizer,
+    dispatch,
     tool_definitions,
 )
 
@@ -555,6 +559,53 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["serverInfo"]["version"], SERVER_VERSION)
         self.assertEqual(len(responses[1]["result"]["tools"]), 13)
 
+    def test_stdio_rejects_non_object_params(self) -> None:
+        script = Path(__file__).with_name("youtube_mcp.py")
+        completed = subprocess.run(
+            [sys.executable, str(script)],
+            input=json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": ["not-an-object"],
+                }
+            )
+            + "\n",
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=5,
+        )
+        response = json.loads(completed.stdout)
+        self.assertEqual(response["error"]["code"], -32602)
+        self.assertIn("expected an object", response["error"]["message"])
+
+    def test_stdio_rejects_non_object_tool_arguments(self) -> None:
+        script = Path(__file__).with_name("youtube_mcp.py")
+        completed = subprocess.run(
+            [sys.executable, str(script)],
+            input=json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "youtube_get_video",
+                        "arguments": ["not-an-object"],
+                    },
+                }
+            )
+            + "\n",
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=5,
+        )
+        response = json.loads(completed.stdout)
+        self.assertEqual(response["error"]["code"], -32602)
+        self.assertIn("arguments must be an object", response["error"]["message"])
+
 
 class ReadTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -580,6 +631,55 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(result["localizations"], VIDEO["localizations"])
         self.assertEqual(result["tags"], VIDEO["tags"])
         self.assertEqual(result["categoryId"], VIDEO["categoryId"])
+
+    def test_invalid_max_results_is_a_tool_error(self) -> None:
+        for value in (None, "many", True, 1.5, [], {}):
+            with self.subTest(value=value):
+                result = dispatch(self.server, "youtube_list_videos", {"max_results": value})
+                self.assertTrue(result["isError"])
+                self.assertIn("max_results must be an integer", result["content"][0]["text"])
+        self.assertEqual(self.server.calls, [])
+
+
+class GoogleErrorTests(unittest.TestCase):
+    def test_google_errors_are_actionable_and_keep_structured_details(self) -> None:
+        cases = (
+            (401, "Unauthorized", "authError", "Reconnect YouTube"),
+            (403, "Forbidden", "quotaExceeded", "quota is exhausted"),
+            (403, "Forbidden", "insufficientPermissions", "OAuth scope"),
+            (400, "Bad request", "localizationValidationError", "rejected the video metadata"),
+            (404, "Missing", "videoNotFound", "not found"),
+        )
+        for status, message, reason, expected in cases:
+            with self.subTest(status=status, reason=reason):
+                failure = GoogleApiFailure(status, message, reason)
+                self.assertEqual(failure.status, status)
+                self.assertEqual(failure.reason, reason)
+                self.assertEqual(failure.api_message, message)
+                self.assertIn(expected, str(failure))
+
+    def test_unknown_google_error_is_bounded_and_single_line(self) -> None:
+        failure = GoogleApiFailure(500, " first\n" + "x" * 600, "backendError")
+        rendered = str(failure)
+        self.assertTrue(rendered.startswith("Google API error (500): first "))
+        self.assertNotIn("\n", rendered)
+        self.assertLessEqual(len(rendered), len("Google API error (500): ") + 500)
+
+    def test_disconnect_invalid_token_behavior_is_unchanged(self) -> None:
+        failure = GoogleApiFailure(400, "Invalid token", "invalid_token")
+        self.assertEqual(failure.status, 400)
+        self.assertEqual(failure.reason, "invalid_token")
+        self.assertIn("Invalid token", str(failure))
+
+    def test_network_error_does_not_expose_low_level_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            server = YouTubeLocalizer(Path(temporary))
+            private_detail = "/Users/example/private-network-config"
+            with patch("youtube_mcp.urlopen", side_effect=URLError(private_detail)):
+                with self.assertRaises(ToolFailure) as raised:
+                    server._open_json(Request("https://www.googleapis.com/youtube/v3/videos"))
+            self.assertNotIn(private_detail, str(raised.exception))
+            self.assertIn("Check network connectivity", str(raised.exception))
 
 
 if __name__ == "__main__":
