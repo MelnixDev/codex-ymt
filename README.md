@@ -21,6 +21,7 @@ It is designed for multilingual YouTube metadata and creator workflows. It can h
 - [Requirements](#requirements)
 - [Install](#install)
 - [Set up Google OAuth](#set-up-google-oauth)
+- [Use another YouTube channel](#use-another-youtube-channel)
 - [First safe run](#first-safe-run)
 - [Example prompts](#example-prompts)
 - [Update or uninstall](#update-or-uninstall)
@@ -110,6 +111,20 @@ Each creator uses their own Google Cloud project and OAuth client. Codex YMT doe
 The plugin uses PKCE, a temporary `127.0.0.1` loopback callback, and offline access so it can refresh the local token. The authorization URL is opened in your normal browser; the plugin never receives your Google password.
 
 For a headless setup, `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` may be configured in the MCP process environment. Codex YMT does not accept client secrets as tool arguments, which keeps them out of the Codex task and tool history.
+
+## Use another YouTube channel
+
+Codex YMT keeps one active Google OAuth connection at a time. To switch to another YouTube channel or Brand Account:
+
+1. Ask Codex to disconnect Codex YMT from YouTube.
+2. Review and approve the disconnect preview. This revokes and removes only the active token; the OAuth client configuration, per-channel settings, and translation drafts are preserved.
+3. Ask Codex to connect Codex YMT to YouTube again.
+4. In the Google consent flow, choose the Google account and YouTube channel or Brand Account that can edit the target video.
+5. List the latest videos and confirm the returned channel title before preparing any localization update.
+
+The same Desktop OAuth client can be reused. If its consent screen is in **Testing**, add every Google account used for channel access as a test user. Preferences remain separated by YouTube channel ID, and drafts remain separated by video ID.
+
+Connecting a Google account does not automatically grant access to every channel associated with that person. If a video cannot be found, reconnect and select the exact channel or Brand Account that owns it.
 
 ## First safe run
 
