@@ -1,6 +1,6 @@
 # Codex YMT
 
-**YouTube Metadata Translator for Codex**
+**Open-source YouTube Title & Description Translator for Codex**
 
 [![Release](https://img.shields.io/github/v/release/MelnixDev/codex-ymt)](https://github.com/MelnixDev/codex-ymt/releases)
 [![Tests](https://github.com/MelnixDev/codex-ymt/actions/workflows/tests.yml/badge.svg)](https://github.com/MelnixDev/codex-ymt/actions/workflows/tests.yml)
@@ -10,9 +10,9 @@
 > [!IMPORTANT]
 > **Early development:** start with an unlisted test video and review every overwrite before publishing. Version `0.0.x` may change as the workflow is tested by more creators.
 
-Codex YMT is an open-source **Codex plugin** and local **MCP server** for YouTube metadata localization. It works as a YouTube title translator and YouTube description translator inside Codex: generate natural translations, review each language, preserve existing localizations, and publish only the changes you explicitly approve through the YouTube Data API v3.
+Codex YMT is an open-source **Codex plugin** and local **MCP server** for YouTube metadata translation and localization. Use it as a YouTube title translator and YouTube description translator inside Codex: generate natural translations, review each language, preserve existing localizations, and publish only the changes you explicitly approve through the YouTube Data API v3.
 
-It is designed for multilingual YouTube metadata and creator workflows. It can help maintain localized titles and descriptions for multilingual discoverability, but it does not promise YouTube SEO rankings. It does not translate audio, subtitles, thumbnails, or video content.
+It is designed for multilingual YouTube metadata, international creator workflows, and multilingual YouTube SEO. It helps maintain localized video titles and descriptions for global discoverability, but it does not promise search rankings. It does not translate audio, subtitles, thumbnails, or video content.
 
 ## Contents
 
