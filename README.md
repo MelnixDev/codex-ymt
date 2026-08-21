@@ -16,19 +16,37 @@ It is designed for multilingual YouTube metadata, international creator workflow
 
 ## Contents
 
+- [How it works](#how-it-works)
 - [What it does](#what-it-does)
 - [Safety model](#safety-model)
 - [Requirements](#requirements)
 - [Install](#install)
+- [60-second first request](#60-second-first-request)
 - [Set up Google OAuth](#set-up-google-oauth)
 - [Use another YouTube channel](#use-another-youtube-channel)
 - [First safe run](#first-safe-run)
+- [Example review and approval](#example-review-and-approval)
 - [Example prompts](#example-prompts)
 - [Update or uninstall](#update-or-uninstall)
 - [Privacy and local data](#privacy-and-local-data)
 - [Troubleshooting](#troubleshooting)
+- [FAQ](#faq)
 - [Development](#development)
 - [Official documentation](#official-documentation)
+
+## How it works
+
+1. **Install Codex YMT** and connect the YouTube channel you manage.
+2. **Ask Codex in normal language** which video and languages you want.
+3. **Codex creates the translations** and saves them as a local draft. Nothing is published yet.
+4. **Review every language** and edit or regenerate individual titles and descriptions.
+5. **Preview the exact YouTube diff**, including additions, overwrites, and preserved localizations.
+6. **Explicitly approve the displayed diff** to save only the selected languages to YouTube.
+
+> [!NOTE]
+> Codex writes the translation text. The local MCP server reads YouTube metadata, stores drafts and channel preferences, and publishes only reviewed localizations after confirmation. There is no separate translation backend or additional OpenAI/Anthropic API key.
+
+Codex YMT adds YouTube's built-in localized metadata. It does not replace the original title or description, translate subtitles or audio, or change the video's visibility. If the source video's default language is missing, the required default-language change appears in the preview before anything is saved.
 
 ## What it does
 
@@ -95,6 +113,20 @@ You can confirm the installation from a terminal:
 codex plugin list
 ```
 
+## 60-second first request
+
+After installation and the one-time Google Cloud setup below, start a new Codex task and send:
+
+```text
+Connect Codex YMT to YouTube. Then translate the title and description of my
+latest video into Ukrainian and Polish. Save a local draft and show me the
+review, but do not publish anything yet.
+```
+
+Codex will ask for the local path to your downloaded Desktop OAuth JSON when needed. Give it only the path, not the JSON contents. Complete Google consent in the browser, return to Codex, and confirm that the channel title and video are correct.
+
+The first Google Cloud setup takes longer than 60 seconds. Later translation requests use the saved local connection until it expires or you disconnect it.
+
 ## Set up Google OAuth
 
 Each creator uses their own Google Cloud project and OAuth client. Codex YMT does not provide a shared OAuth application or proxy your Google credentials through a third-party backend.
@@ -116,15 +148,15 @@ For a headless setup, `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` may be con
 
 Codex YMT keeps one active Google OAuth connection at a time. To switch to another YouTube channel or Brand Account:
 
-1. Ask Codex to disconnect Codex YMT from YouTube.
-2. Review and approve the disconnect preview. This revokes and removes only the active token; the OAuth client configuration, per-channel settings, and translation drafts are preserved.
-3. Ask Codex to connect Codex YMT to YouTube again.
-4. In the Google consent flow, choose the Google account and YouTube channel or Brand Account that can edit the target video.
-5. List the latest videos and confirm the returned channel title before preparing any localization update.
+1. If one Google account manages multiple channels, set the target channel as the [default channel for third-party apps](https://support.google.com/youtube/answer/3046478?hl=en).
+2. Ask Codex to disconnect Codex YMT from YouTube.
+3. Review and approve the disconnect preview. This revokes and removes only the active token; the OAuth client configuration, per-channel settings, and translation drafts are preserved.
+4. Ask Codex to connect Codex YMT to YouTube again and use the Google account that manages the target channel.
+5. List the latest videos and confirm the returned channel title before preparing any localization update. Stop if the wrong channel is shown.
 
 The same Desktop OAuth client can be reused. If its consent screen is in **Testing**, add every Google account used for channel access as a test user. Preferences remain separated by YouTube channel ID, and drafts remain separated by video ID.
 
-Connecting a Google account does not automatically grant access to every channel associated with that person. If a video cannot be found, reconnect and select the exact channel or Brand Account that owns it.
+Codex YMT does not provide its own channel picker. YouTube may use the Google account's default channel for third-party API applications. If a Brand Account is missing, confirm that the connected Google account is allowed to manage it, set the correct default channel, reconnect, and verify the returned channel title.
 
 ## First safe run
 
@@ -136,6 +168,35 @@ Connecting a Google account does not automatically grant access to every channel
 6. Open YouTube Studio and verify the saved localizations.
 
 A request to translate, draft, regenerate, or prepare is never treated as permission to publish.
+
+## Example review and approval
+
+Before saving, Codex should show a review similar to this:
+
+```text
+Video: Spring product update
+Source language: English
+
+Ukrainian — add
+Title: Весняне оновлення продукту
+Description: 184 characters / 307 UTF-8 bytes
+
+Polish — overwrite
+Previous title: Wiosenna aktualizacja
+New title: Wiosenna aktualizacja produktu
+Description: 172 characters / 179 UTF-8 bytes
+
+Existing localizations preserved: 3
+Nothing has been saved to YouTube yet.
+```
+
+After you ask Codex to prepare the final update, it shows the exact diff and asks for confirmation. Approve only that displayed preview, for example:
+
+```text
+I reviewed this preview. Save only Ukrainian and Polish.
+```
+
+If you change any translation after the preview, prepare and review a new diff. If the YouTube video changes before commit, the plugin rejects the stale preview instead of overwriting newer metadata.
 
 ## Example prompts
 
@@ -245,6 +306,36 @@ Read [PRIVACY.md](PRIVACY.md) before using the plugin with private or commercial
 | YouTube API quota is exhausted | Wait for the quota reset or review the project quota in Google Cloud. A `videos.update` call costs 50 quota units. |
 
 YouTube API quota and Google account policies still apply.
+
+## FAQ
+
+### Can Codex YMT delete a video or change its visibility?
+
+No. The plugin exposes no tool for deleting videos, uploading content, or changing public, private, or unlisted visibility. Google grants a broader OAuth scope than the plugin uses, so the local OAuth files must still be protected.
+
+### Does it translate subtitles, audio, or thumbnails?
+
+No. It translates only YouTube's localized video title and description fields.
+
+### Do I need an OpenAI or Anthropic API key?
+
+No additional AI-provider key is required. Codex generates the translations; your own Google OAuth client is used only to read YouTube metadata and publish approved localizations.
+
+### Can it publish automatically after translation?
+
+No. Translation and revision create a local draft. Publishing requires a fresh diff followed by explicit approval of that exact preview.
+
+### What happens to existing YouTube localizations?
+
+Unselected languages are preserved. A selected language is labeled `add`, `overwrite`, or `unchanged` before approval.
+
+### Can I use multiple YouTube channels?
+
+Yes, one active Google connection at a time. Follow [Use another YouTube channel](#use-another-youtube-channel) when switching. Channel preferences are stored per channel ID; drafts are stored per video ID.
+
+### Where is my data stored?
+
+OAuth credentials, tokens, channel settings, and drafts stay in the plugin's local data directory. Codex YMT has no separate backend, analytics, advertising, or telemetry. See [Privacy and local data](#privacy-and-local-data).
 
 ## Versioning
 
