@@ -13,7 +13,7 @@ Read this reference only when connecting a YouTube account or diagnosing authent
 
 `youtube_configure_oauth` accepts only the local JSON path. For a headless environment, configure `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` in the MCP process environment rather than passing secrets through the Codex task.
 
-Only the Google **Desktop app** OAuth client format is accepted. Web application clients are rejected. If a different Desktop client is configured, Codex YMT removes the incompatible local token and requires authorization again; configuring the same client keeps its token.
+Only the Google **Desktop app** OAuth client format is accepted. Web application clients are rejected. If a different Desktop client is configured, Codex YMT removes incompatible profile tokens and requires authorization again; configuring the same client keeps them.
 
 The plugin requests `https://www.googleapis.com/auth/youtube.force-ssl`. It uses a temporary loopback callback on `127.0.0.1`, stores the resulting refresh token locally, and never sends it to a separate plugin backend.
 
@@ -23,7 +23,7 @@ Official references: [YouTube OAuth for installed apps](https://developers.googl
 
 ## Disconnect
 
-Use `youtube_prepare_disconnect`, show its effects, and ask for explicit approval before calling `youtube_commit_disconnect`. A successful commit revokes the refresh token (or access token when no refresh token exists) through Google's [revocation endpoint](https://developers.google.com/identity/openid-connect/reference#revocation_endpoint), then deletes only the local token file.
+Use `youtube_prepare_disconnect`, show its effects, and ask for explicit approval before calling `youtube_commit_disconnect`. A successful commit revokes the active profile's refresh token (or access token when no refresh token exists) through Google's [revocation endpoint](https://developers.google.com/identity/openid-connect/reference#revocation_endpoint), then deletes only that profile's local token file.
 
 If Google reports `invalid_token`, treat the connection as already revoked and remove the local token. For network or other Google errors, keep the token so the user can retry. OAuth client configuration, channel settings, and drafts are never removed by the disconnect tools.
 

@@ -35,14 +35,14 @@ Video titles, descriptions, existing localizations, channel instructions, and ge
 
 The Google OAuth client secret and refresh token should never be pasted into the conversation. Use the local OAuth JSON path workflow instead. Codex YMT does not accept a client secret as an MCP tool argument; headless environments can provide credentials through process environment variables.
 
-Configuring a different OAuth client removes an existing local token because that token cannot be safely reused with the new client. Configuring the same client preserves its token.
+Configuring a different OAuth client removes existing profile tokens because they cannot be safely reused with the new client. Configuring the same client preserves them.
 
 ## Delete or revoke access
 
 To disconnect completely:
 
 1. Ask Codex YMT to prepare a disconnect preview.
-2. Review and approve the preview. The plugin revokes the Google token and deletes only `oauth-token.json`; OAuth client configuration, channel settings, and drafts remain.
+2. Review and approve the preview. The plugin revokes the active profile's Google token and deletes only its file under `oauth-profiles/`; other profiles, OAuth client configuration, channel settings, and drafts remain.
 3. Disable or uninstall the Codex YMT plugin.
 4. Delete the plugin's local data directory, or the fallback `~/.config/codex-ymt/` directory, if you also want to remove the preserved local data.
 

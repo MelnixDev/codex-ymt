@@ -9,10 +9,13 @@ Use the `codex-ymt` MCP tools for YouTube data and local storage. Generate trans
 
 ## Connect
 
-1. Call `youtube_auth_status`.
-2. If OAuth is not configured, read [references/google-oauth.md](references/google-oauth.md). Ask for the local path to a downloaded Desktop OAuth JSON and call `youtube_configure_oauth` with `client_json_path`. For headless environments, the user can configure `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` outside the conversation.
-3. If disconnected, call `youtube_auth_start`, give the returned URL to the user, and wait for them to finish Google consent. Then call `youtube_auth_status` again.
-4. Never request that the user paste a secret into the conversation when a local OAuth JSON file is available. Never expose stored credentials or tokens in the response.
+1. Call `youtube_list_auth_profiles`. If the requested channel already has a connected profile, call `youtube_select_auth_profile` instead of starting OAuth again.
+2. Call `youtube_auth_status`.
+3. If OAuth is not configured, read [references/google-oauth.md](references/google-oauth.md). Ask for the local path to a downloaded Desktop OAuth JSON and call `youtube_configure_oauth` with `client_json_path`. For headless environments, the user can configure `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` outside the conversation.
+4. If disconnected, call `youtube_auth_start` with a stable, descriptive profile such as `qx-mode` or `volo-space`, give the returned URL to the user, and wait for them to finish Google consent. Then call `youtube_auth_status` again.
+5. Never request that the user paste a secret into the conversation when a local OAuth JSON file is available. Never expose stored credentials or tokens in the response.
+
+OAuth profiles keep multiple channel connections locally. Selecting a profile changes only which stored token subsequent YouTube calls use; it does not revoke or overwrite other profiles.
 
 ## Disconnect
 

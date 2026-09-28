@@ -1,6 +1,6 @@
 {
   "name": "codex-ymt",
-  "version": "0.0.3",
+  "version": "0.0.3+codex.20260928220222",
   "description": "A Codex plugin for translating, reviewing, and safely publishing YouTube video titles and descriptions.",
   "author": {
     "name": "MelnixDev",

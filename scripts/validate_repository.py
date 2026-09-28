@@ -14,7 +14,10 @@ from youtube_mcp import SERVER_VERSION, tool_definitions
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_NAME = "codex-ymt"
 SKILL_NAME = "localize-youtube-video"
-SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+SEMVER = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"
+)
 SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
@@ -62,7 +65,7 @@ def validate_plugin() -> None:
 
     tools = tool_definitions()
     names = [tool.get("name") for tool in tools]
-    require(len(names) == 13, "the public MCP tool count changed")
+    require(len(names) == 15, "the public MCP tool count changed")
     require(len(names) == len(set(names)), "MCP tool names must be unique")
 
 

@@ -164,6 +164,7 @@ class UpdateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.server = FakeYouTubeLocalizer(Path(self.temp.name))
+        self.server.profiles_dir.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -376,6 +377,42 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(result["token_cleared"])
         self.assertTrue(self.server.token_path.exists())
 
+    def test_oauth_profiles_keep_separate_tokens(self) -> None:
+        self.server._token_path("volo-space").parent.mkdir(parents=True, exist_ok=True)
+        self.server._token_path("volo-space").write_text(
+            '{"refresh_token":"volo-token"}', encoding="utf-8"
+        )
+        self.server._token_path("qx-mode").write_text(
+            '{"refresh_token":"qx-token"}', encoding="utf-8"
+        )
+
+        selected = self.server.select_auth_profile({"profile": "qx-mode"})
+        self.assertEqual(selected["active_profile"], "qx-mode")
+        self.assertEqual(
+            json.loads(self.server.token_path.read_text(encoding="utf-8"))["refresh_token"],
+            "qx-token",
+        )
+        self.assertEqual(
+            self.server.list_auth_profiles({}),
+            {"active_profile": "qx-mode", "profiles": ["qx-mode", "volo-space"]},
+        )
+
+    def test_select_auth_profile_requires_connected_profile(self) -> None:
+        with self.assertRaisesRegex(ToolFailure, "is not connected"):
+            self.server.select_auth_profile({"profile": "missing"})
+
+    def test_legacy_token_is_migrated_without_deletion(self) -> None:
+        root = Path(self.temp.name) / "legacy"
+        root.mkdir()
+        legacy = root / "oauth-token.json"
+        legacy.write_text('{"refresh_token":"legacy-token"}', encoding="utf-8")
+        server = FakeYouTubeLocalizer(root)
+        self.assertTrue(legacy.exists())
+        self.assertEqual(
+            json.loads(server.token_path.read_text(encoding="utf-8"))["refresh_token"],
+            "legacy-token",
+        )
+
     def test_valid_access_token_does_not_refresh(self) -> None:
         self.server.token_path.write_text(
             json.dumps({"access_token": "current-token", "expires_at": time.time() + 600}),
@@ -517,7 +554,7 @@ class ProtocolTests(unittest.TestCase):
     def test_tool_names_are_unique(self) -> None:
         names = [tool["name"] for tool in tool_definitions()]
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(len(names), 13)
+        self.assertEqual(len(names), 15)
 
     def test_server_version_matches_plugin_manifest(self) -> None:
         manifest_path = Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
@@ -557,7 +594,7 @@ class ProtocolTests(unittest.TestCase):
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "codex-ymt")
         self.assertEqual(responses[0]["result"]["serverInfo"]["version"], SERVER_VERSION)
-        self.assertEqual(len(responses[1]["result"]["tools"]), 13)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 15)
 
     def test_stdio_rejects_non_object_params(self) -> None:
         script = Path(__file__).with_name("youtube_mcp.py")

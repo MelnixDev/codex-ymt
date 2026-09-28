@@ -146,15 +146,15 @@ For a headless setup, `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` may be con
 
 ## Use another YouTube channel
 
-Codex YMT keeps one active Google OAuth connection at a time. To switch to another YouTube channel or Brand Account:
+Codex YMT keeps multiple named Google OAuth profiles and uses one active profile at a time. To add or switch to another YouTube channel or Brand Account:
 
 1. If one Google account manages multiple channels, set the target channel as the [default channel for third-party apps](https://support.google.com/youtube/answer/3046478?hl=en).
-2. Ask Codex to disconnect Codex YMT from YouTube.
-3. Review and approve the disconnect preview. This revokes and removes only the active token; the OAuth client configuration, per-channel settings, and translation drafts are preserved.
+2. Ask Codex to connect it under a stable profile name such as `qx-mode` or `volo-space`.
+3. Later, ask Codex to switch profiles. Existing profiles remain stored, so switching does not require Google consent again.
 4. Ask Codex to connect Codex YMT to YouTube again and use the Google account that manages the target channel.
 5. List the latest videos and confirm the returned channel title before preparing any localization update. Stop if the wrong channel is shown.
 
-The same Desktop OAuth client can be reused. If its consent screen is in **Testing**, add every Google account used for channel access as a test user. Preferences remain separated by YouTube channel ID, and drafts remain separated by video ID.
+The same Desktop OAuth client can be reused. If its consent screen is in **Testing**, add every Google account used for channel access as a test user. Tokens are separated by OAuth profile, preferences by YouTube channel ID, and drafts by video ID. Disconnecting revokes and removes only the active profile.
 
 Codex YMT does not provide its own channel picker. YouTube may use the Google account's default channel for third-party API applications. If a Brand Account is missing, confirm that the connected Google account is allowed to manage it, set the correct default channel, reconnect, and verify the returned channel title.
 
@@ -242,7 +242,7 @@ Restart the desktop app and use a new task after updating.
 
 ### Upgrading from v0.0.1
 
-`youtube_configure_oauth` no longer accepts direct `client_id` or `client_secret` arguments. Provide `client_json_path`, or configure the environment variables documented above. Reconfiguring with a different OAuth client removes the incompatible local token and requires Google authorization again; reconfiguring the same client preserves its token.
+`youtube_configure_oauth` no longer accepts direct `client_id` or `client_secret` arguments. Provide `client_json_path`, or configure the environment variables documented above. Reconfiguring with a different OAuth client removes all incompatible profile tokens and requires Google authorization again; reconfiguring the same client preserves them.
 
 ### Upgrading from v0.0.2
 
@@ -260,7 +260,7 @@ Optionally remove its marketplace source:
 codex plugin marketplace remove codex-ymt
 ```
 
-Before uninstalling, ask Codex to disconnect YouTube. Codex YMT will preview the exact effect, request confirmation, revoke the Google token, and delete only the local token file. If remote revocation fails, the local token is retained so the operation can be retried.
+Before uninstalling, ask Codex to disconnect each YouTube profile. Codex YMT will preview the exact effect, request confirmation, revoke the active profile's Google token, and delete only that profile's local token file. If remote revocation fails, the token is retained so the operation can be retried.
 
 Uninstalling the plugin itself does not automatically revoke Google authorization or delete local data. See the next section for a complete disconnect or manual fallback.
 
@@ -331,7 +331,7 @@ Unselected languages are preserved. A selected language is labeled `add`, `overw
 
 ### Can I use multiple YouTube channels?
 
-Yes, one active Google connection at a time. Follow [Use another YouTube channel](#use-another-youtube-channel) when switching. Channel preferences are stored per channel ID; drafts are stored per video ID.
+Yes. Each channel can have its own named OAuth profile, while one profile is active at a time. Switching profiles does not require reconnecting. Channel preferences are stored per channel ID; drafts are stored per video ID.
 
 ### Where is my data stored?
 

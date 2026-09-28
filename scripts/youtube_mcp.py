@@ -22,7 +22,7 @@ from urllib.request import Request, urlopen
 
 
 SERVER_NAME = "codex-ymt"
-SERVER_VERSION = "0.0.3"
+SERVER_VERSION = "0.0.3+codex.20260928220222"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
@@ -32,6 +32,7 @@ TITLE_LIMIT = 100
 DESCRIPTION_LIMIT = 5000
 PENDING_TTL_SECONDS = 15 * 60
 DISCONNECT_TTL_SECONDS = 5 * 60
+PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 
 
 class ToolFailure(RuntimeError):
@@ -164,13 +165,75 @@ class YouTubeLocalizer:
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or data_root()
         self.credentials_path = self.root / "oauth-client.json"
-        self.token_path = self.root / "oauth-token.json"
+        self.profiles_dir = self.root / "oauth-profiles"
+        self.active_profile_path = self.root / "active-oauth-profile.json"
         self.settings_path = self.root / "channel-settings.json"
         self.drafts_dir = self.root / "drafts"
         self._auth: dict[str, Any] | None = None
         self._auth_server: ThreadingHTTPServer | None = None
         self._pending: dict[str, dict[str, Any]] = {}
         self._disconnect_pending: dict[str, dict[str, Any]] = {}
+        self._migrate_legacy_token()
+
+    @staticmethod
+    def _profile_name(value: Any) -> str:
+        profile = str(value or "default").strip().lower()
+        if not PROFILE_RE.fullmatch(profile):
+            raise ToolFailure(
+                "OAuth profile must use 1-64 lowercase letters, numbers, hyphens, or underscores."
+            )
+        return profile
+
+    @property
+    def active_profile(self) -> str:
+        state = read_json(self.active_profile_path, {})
+        return self._profile_name(state.get("profile", "default"))
+
+    @property
+    def token_path(self) -> Path:
+        return self._token_path(self.active_profile)
+
+    def _token_path(self, profile: str) -> Path:
+        return self.profiles_dir / f"{self._profile_name(profile)}.json"
+
+    def _set_active_profile(self, profile: str) -> None:
+        atomic_write_json(
+            self.active_profile_path,
+            {"profile": self._profile_name(profile), "updated_at": utc_timestamp()},
+        )
+
+    def _migrate_legacy_token(self) -> None:
+        legacy = self.root / "oauth-token.json"
+        default = self._token_path("default")
+        existing_profiles = list(self.profiles_dir.glob("*.json")) if self.profiles_dir.exists() else []
+        if legacy.exists() and not existing_profiles and not default.exists():
+            token = read_json(legacy, {})
+            if token:
+                try:
+                    atomic_write_json(default, token)
+                except OSError:
+                    # Read-only discovery contexts must still be able to list MCP tools.
+                    pass
+
+    def list_auth_profiles(self, _args: dict[str, Any]) -> dict[str, Any]:
+        profiles = []
+        if self.profiles_dir.exists():
+            profiles = sorted(
+                path.stem
+                for path in self.profiles_dir.glob("*.json")
+                if PROFILE_RE.fullmatch(path.stem)
+            )
+        return {"active_profile": self.active_profile, "profiles": profiles}
+
+    def select_auth_profile(self, args: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_name(args.get("profile"))
+        token = read_json(self._token_path(profile), {})
+        if not token.get("refresh_token") and not token.get("access_token"):
+            raise ToolFailure(
+                f"OAuth profile '{profile}' is not connected. Start authorization for that profile."
+            )
+        self._set_active_profile(profile)
+        return {"selected": True, "active_profile": profile, "connected": True}
 
     # OAuth
 
@@ -215,13 +278,15 @@ class YouTubeLocalizer:
             raise ToolFailure("client_secret is missing or invalid.")
         existing = read_json(self.credentials_path, {})
         existing_client_id = existing.get("client_id") if isinstance(existing, dict) else None
-        token_cleared = self.token_path.exists() and existing_client_id != client_id
+        profile_tokens = list(self.profiles_dir.glob("*.json")) if self.profiles_dir.exists() else []
+        token_cleared = bool(profile_tokens) and existing_client_id != client_id
         atomic_write_json(
             self.credentials_path,
             {"client_id": client_id, "client_secret": client_secret},
         )
         if token_cleared:
-            self._delete_local_token()
+            for profile_token in profile_tokens:
+                profile_token.unlink(missing_ok=True)
         return {
             "configured": True,
             "source": "local_json_file",
@@ -230,8 +295,9 @@ class YouTubeLocalizer:
             "reconnect_required": token_cleared or not self.token_path.exists(),
         }
 
-    def auth_start(self, _args: dict[str, Any]) -> dict[str, Any]:
+    def auth_start(self, args: dict[str, Any]) -> dict[str, Any]:
         credentials = self._credentials()
+        profile = self._profile_name(args.get("profile", self.active_profile))
         if self._auth_server:
             try:
                 self._auth_server.shutdown()
@@ -245,6 +311,7 @@ class YouTubeLocalizer:
             hashlib.sha256(verifier.encode("ascii")).digest()
         ).rstrip(b"=").decode("ascii")
         auth_state: dict[str, Any] = {
+            "profile": profile,
             "state": state,
             "verifier": verifier,
             "started_at": time.time(),
@@ -311,6 +378,7 @@ class YouTubeLocalizer:
         )
         return {
             "status": "awaiting_user",
+            "profile": profile,
             "authorization_url": f"{GOOGLE_AUTH_URL}?{query}",
             "expires_in_seconds": 300,
             "next": "Open the URL, approve access, then call youtube_auth_status.",
@@ -336,7 +404,12 @@ class YouTubeLocalizer:
                 self._exchange_code()
                 self._auth = None
             elif time.time() - self._auth["started_at"] < 300:
-                return {"configured": True, "connected": False, "status": "awaiting_user"}
+                return {
+                    "configured": True,
+                    "connected": False,
+                    "status": "awaiting_user",
+                    "profile": self._auth["profile"],
+                }
             else:
                 self._stop_auth_server()
                 self._auth = None
@@ -352,6 +425,7 @@ class YouTubeLocalizer:
             "configured": configured,
             "connected": bool(token.get("refresh_token") or token.get("access_token")),
             "status": "connected" if token else "not_connected",
+            "active_profile": self.active_profile,
             "scope": token.get("scope", YOUTUBE_SCOPE) if token else YOUTUBE_SCOPE,
         }
 
@@ -371,7 +445,9 @@ class YouTubeLocalizer:
             },
         )
         payload["expires_at"] = time.time() + int(payload.get("expires_in", 3600))
-        atomic_write_json(self.token_path, payload)
+        profile = self._profile_name(self._auth["profile"])
+        atomic_write_json(self._token_path(profile), payload)
+        self._set_active_profile(profile)
 
     def _form_request(self, url: str, values: dict[str, Any]) -> dict[str, Any]:
         request = Request(
@@ -454,15 +530,17 @@ class YouTubeLocalizer:
             }
         confirmation_token = secrets.token_urlsafe(24)
         self._disconnect_pending[confirmation_token] = {
+            "profile": self.active_profile,
             "expires_at": time.time() + DISCONNECT_TTL_SECONDS,
             "token_fingerprint": canonical_hash(str(revoke_token)),
         }
         return {
             "ready": True,
             "connected": True,
+            "profile": self.active_profile,
             "effects": [
                 "Revoke the stored Google token.",
-                "Delete the local oauth-token.json file.",
+                f"Delete only the local token for OAuth profile '{self.active_profile}'.",
             ],
             "preserved": [
                 "OAuth client configuration",
@@ -485,6 +563,10 @@ class YouTubeLocalizer:
             self._disconnect_pending.pop(confirmation_token, None)
             raise ToolFailure(
                 "Disconnect confirmation token expired. Prepare and approve a new preview."
+            )
+        if pending["profile"] != self.active_profile:
+            raise ToolFailure(
+                "The active OAuth profile changed after the disconnect preview. Switch back or prepare a new preview."
             )
 
         token_data = read_json(self.token_path, {})
@@ -520,7 +602,12 @@ class YouTubeLocalizer:
             "remote_revoked": not already_revoked,
             "local_token_deleted": True,
             "already_revoked": already_revoked,
-            "preserved": ["oauth-client.json", "channel settings", "translation drafts"],
+            "preserved": [
+                "other OAuth profiles",
+                "oauth-client.json",
+                "channel settings",
+                "translation drafts",
+            ],
         }
 
     def _delete_local_token(self) -> None:
@@ -852,6 +939,7 @@ class YouTubeLocalizer:
 
         token = secrets.token_urlsafe(24)
         pending = {
+            "profile": self.active_profile,
             "video_id": video_id,
             "selected_languages": selected,
             "merged_localizations": merged,
@@ -882,6 +970,10 @@ class YouTubeLocalizer:
         if pending["expires_at"] < time.time():
             self._pending.pop(token, None)
             raise ToolFailure("Confirmation token expired. Prepare and review a new preview.")
+        if pending["profile"] != self.active_profile:
+            raise ToolFailure(
+                "The active OAuth profile changed after preview. Switch back or prepare a new preview."
+            )
         video = self._get_video(pending["video_id"])
         if (
             self._state_fingerprint(video) != pending["state_fingerprint"]
@@ -962,7 +1054,15 @@ def tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "youtube_auth_start",
             "description": "Start Google OAuth and return a browser URL for the user to approve YouTube access.",
-            "inputSchema": {**object_schema, "properties": {}},
+            "inputSchema": {
+                **object_schema,
+                "properties": {
+                    "profile": {
+                        "type": "string",
+                        "description": "OAuth profile name, for example qx-mode or volo-space.",
+                    }
+                },
+            },
             "annotations": {
                 "readOnlyHint": False,
                 "destructiveHint": False,
@@ -977,6 +1077,26 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "readOnlyHint": False,
                 "destructiveHint": False,
                 "openWorldHint": True,
+            },
+        },
+        {
+            "name": "youtube_list_auth_profiles",
+            "description": "List locally stored YouTube OAuth profiles and the active profile.",
+            "inputSchema": {**object_schema, "properties": {}},
+            "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        },
+        {
+            "name": "youtube_select_auth_profile",
+            "description": "Switch to an existing connected YouTube OAuth profile without signing in again.",
+            "inputSchema": {
+                **object_schema,
+                "properties": {"profile": {"type": "string"}},
+                "required": ["profile"],
+            },
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "openWorldHint": False,
             },
         },
         {
@@ -1112,6 +1232,8 @@ def dispatch(server: YouTubeLocalizer, name: str, args: dict[str, Any]) -> dict[
         "youtube_configure_oauth": server.configure_oauth,
         "youtube_auth_start": server.auth_start,
         "youtube_auth_status": server.auth_status,
+        "youtube_list_auth_profiles": server.list_auth_profiles,
+        "youtube_select_auth_profile": server.select_auth_profile,
         "youtube_prepare_disconnect": server.prepare_disconnect,
         "youtube_commit_disconnect": server.commit_disconnect,
         "youtube_list_videos": server.list_videos,
